@@ -290,11 +290,11 @@ func (f *File) GetObjCClasses() ([]objc.Class, error) {
 						class, err := f.GetObjCClass2(f.vma.Convert(ptr))
 						if err != nil {
 							if f.HasFixups() {
-								bindName, err := f.GetBindName(ptr)
-								if err == nil {
+								bindName, bindErr := f.GetBindName(ptr)
+								if bindErr == nil {
 									class = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 								} else {
-									return nil, fmt.Errorf("failed to read objc_class_t at vmaddr %#x: %v", ptr, err)
+									return nil, fmt.Errorf("failed to read objc_class_t at vmaddr %#x: %v", ptr, errors.Join(bindErr, err))
 								}
 							} else {
 								return nil, fmt.Errorf("failed to read objc_class_t at vmaddr %#x: %v", ptr, err)
@@ -481,11 +481,11 @@ func (f *File) GetObjCClass(vmaddr uint64) (*objc.Class, error) {
 				superClass, err = f.GetObjCClass(classPtr.SuperclassVMAddr)
 				if err != nil {
 					if f.HasFixups() {
-						bindName, err := f.GetBindName(classPtr.SuperclassVMAddr)
-						if err == nil {
+						bindName, bindErr := f.GetBindName(classPtr.SuperclassVMAddr)
+						if bindErr == nil {
 							superClass = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 						} else {
-							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, err)
+							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, errors.Join(bindErr, err))
 						}
 					} else {
 						superClass = &objc.Class{}
@@ -518,11 +518,11 @@ func (f *File) GetObjCClass(vmaddr uint64) (*objc.Class, error) {
 				isaClass, err = f.GetObjCClass(classPtr.IsaVMAddr)
 				if err != nil {
 					if f.HasFixups() {
-						bindName, err := f.GetBindName(classPtr.IsaVMAddr)
-						if err == nil {
+						bindName, bindErr := f.GetBindName(classPtr.IsaVMAddr)
+						if bindErr == nil {
 							isaClass = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 						} else {
-							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, err)
+							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, errors.Join(bindErr, err))
 						}
 					} else {
 						isaClass = &objc.Class{}
@@ -673,11 +673,11 @@ func (f *File) GetObjCClass2(vmaddr uint64) (*objc.Class, error) {
 				superClass, err = f.GetObjCClass2(classPtr.SuperclassVMAddr)
 				if err != nil {
 					if f.HasFixups() {
-						bindName, err := f.GetBindName(classPtr.SuperclassVMAddr)
-						if err == nil {
+						bindName, bindErr := f.GetBindName(classPtr.SuperclassVMAddr)
+						if bindErr == nil {
 							superClass = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 						} else {
-							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, err)
+							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, errors.Join(bindErr, err))
 						}
 					} else {
 						superClass = &objc.Class{}
@@ -710,11 +710,11 @@ func (f *File) GetObjCClass2(vmaddr uint64) (*objc.Class, error) {
 				isaClass, err = f.GetObjCClass(classPtr.IsaVMAddr)
 				if err != nil {
 					if f.HasFixups() {
-						bindName, err := f.GetBindName(classPtr.IsaVMAddr)
-						if err == nil {
+						bindName, bindErr := f.GetBindName(classPtr.IsaVMAddr)
+						if bindErr == nil {
 							isaClass = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 						} else {
-							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, err)
+							return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", vmaddr, errors.Join(bindErr, err))
 						}
 					} else {
 						isaClass = &objc.Class{}
@@ -810,10 +810,10 @@ func (f *File) GetObjCCategories() ([]objc.Category, error) {
 							category.Class, err = f.GetObjCClass(categoryPtr.ClsVMAddr)
 							if err != nil {
 								if f.HasFixups() {
-									bindName, err := f.GetBindName(categoryPtr.ClsVMAddr)
-									if err != nil {
-										if !errors.Is(err, ErrMachONoBindInfo) {
-											return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", categoryPtr.ClsVMAddr, err)
+									bindName, bindErr := f.GetBindName(categoryPtr.ClsVMAddr)
+									if bindErr != nil {
+										if !errors.Is(bindErr, ErrMachONoBindInfo) {
+											return nil, fmt.Errorf("failed to read super class objc_class_t at vmaddr: %#x; %v", categoryPtr.ClsVMAddr, errors.Join(bindErr, err))
 										}
 									} else {
 										category.Class = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
@@ -1454,13 +1454,12 @@ func (f *File) GetObjCClassReferences() (map[uint64]*objc.Class, error) {
 					} else {
 						if cls, err := f.GetObjCClass(ptr); err != nil {
 							if f.HasFixups() {
-								if bindName, err := f.GetBindName(ptr); err == nil {
+								if bindName, bindErr := f.GetBindName(ptr); bindErr == nil {
 									clsRefs[sec.Addr+uint64(idx*sizeOfInt64)] = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 								} else {
-									return nil, fmt.Errorf("failed to read objc_class_t at classref ptr: %#x; %v", ptr, err)
+									return nil, fmt.Errorf("failed to read objc_class_t at classref ptr: %#x; %v", ptr, errors.Join(bindErr, err))
 								}
 							}
-							// TODO: don't swallow error here
 						} else {
 							clsRefs[sec.Addr+uint64(idx*sizeOfInt64)] = cls
 							f.PutObjC(ptr, cls)
@@ -1502,13 +1501,12 @@ func (f *File) GetObjCSuperReferences() (map[uint64]*objc.Class, error) {
 					} else {
 						if cls, err := f.GetObjCClass(ptr); err != nil {
 							if f.HasFixups() {
-								if bindName, err := f.GetBindName(ptr); err == nil {
+								if bindName, bindErr := f.GetBindName(ptr); bindErr == nil {
 									clsRefs[sec.Addr+uint64(idx*sizeOfInt64)] = &objc.Class{Name: strings.TrimPrefix(bindName, "_OBJC_CLASS_$_")}
 								} else {
-									return nil, fmt.Errorf("failed to read objc_class_t at superref ptr: %#x; %v", ptr, err)
+									return nil, fmt.Errorf("failed to read objc_class_t at superref ptr: %#x; %v", ptr, errors.Join(bindErr, err))
 								}
 							}
-							// TODO: don't swallow error here
 						} else {
 							clsRefs[sec.Addr+uint64(idx*sizeOfInt64)] = cls
 							f.PutObjC(ptr, cls)
