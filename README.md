@@ -47,7 +47,8 @@ func main() {
 This library uses Go's structured logging (`log/slog`) for diagnostic messages. By default, no logs are emitted. To see library diagnostics (warnings about malformed Mach-O data, etc.), set up an slog handler in your application:
 
 ```go
-import ("log/slog"
+import (
+	"log/slog"
 	"os"
 )
 
