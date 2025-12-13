@@ -404,6 +404,23 @@ type CFString64Type struct {
 	Length    uint64 // number of non-NULL characters in above
 }
 
+// CFString encoding constants (derived from Info field)
+const (
+	CFStringEncodingMask    = 0x0FF0 // mask to extract encoding from Info field
+	CFStringEncodingASCII   = 0x07C8 // UTF-8/ASCII encoding
+	CFStringEncodingUnicode = 0x07D0 // UTF-16LE encoding
+)
+
+// Encoding returns the string encoding type from the CFString Info field
+func (c CFString64Type) Encoding() uint64 {
+	return c.Info & CFStringEncodingMask
+}
+
+// IsUTF16 returns true if the CFString uses UTF-16 encoding
+func (c CFString64Type) IsUTF16() bool {
+	return c.Encoding() == CFStringEncodingUnicode
+}
+
 const (
 	FAST_IS_SWIFT_LEGACY = 1 << 0 // < 5
 	FAST_IS_SWIFT_STABLE = 1 << 1 // 5.X

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf16"
 
 	"github.com/blacktop/go-dwarf"
 
@@ -1803,6 +1804,23 @@ func (f *File) GetCString(addr uint64) (string, error) {
 		return "", fmt.Errorf("%w at address %#x", ErrCStringNotFound, addr)
 	}
 	return "", fmt.Errorf("%w at address %#x", ErrCStringNoTerminator, addr)
+}
+
+// getUTF16String reads a UTF-16LE encoded string at a given virtual address.
+// charCount is the number of UTF-16 code units (not bytes).
+func (f *File) getUTF16String(addr, charCount uint64) (string, error) {
+	if charCount == 0 {
+		return "", nil
+	}
+	buf := make([]byte, charCount*2)
+	if _, err := f.cr.ReadAtAddr(buf, addr); err != nil {
+		return "", fmt.Errorf("failed to read UTF-16 string at address %#x: %w", addr, err)
+	}
+	codes := make([]uint16, charCount)
+	for i := range codes {
+		codes[i] = f.ByteOrder.Uint16(buf[i*2:])
+	}
+	return string(utf16.Decode(codes)), nil
 }
 
 func (f *File) GetCStrings() (map[string]map[string]uint64, error) {

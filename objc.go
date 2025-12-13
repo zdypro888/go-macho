@@ -1645,9 +1645,14 @@ func (f *File) GetCFStrings() ([]objc.CFString, error) {
 					//   return nullptr;
 					// cfs_characters = n_value;
 				}
-				cfstrings[idx].Name, err = f.GetCString(cfstrings[idx].Data)
+				// Check encoding from Info field and use appropriate string reader
+				if cfstrings[idx].CFString64Type.IsUTF16() {
+					cfstrings[idx].Name, err = f.getUTF16String(cfstrings[idx].Data, cfstrings[idx].Length)
+				} else {
+					cfstrings[idx].Name, err = f.GetCString(cfstrings[idx].Data)
+				}
 				if err != nil {
-					return nil, fmt.Errorf("failed to read cstring: %v", err)
+					return nil, fmt.Errorf("failed to read cfstring: %v", err)
 				}
 				if c, ok := f.objc[cfstrings[idx].IsaVMAddr]; ok {
 					cfstrings[idx].Class = c.(*objc.Class)
