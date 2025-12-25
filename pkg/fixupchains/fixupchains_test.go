@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 func TestLookupFunctionality(t *testing.T) {

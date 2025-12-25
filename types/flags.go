@@ -24,12 +24,18 @@ const (
 )
 
 type Rebase struct {
-	Type    uint8
-	Segment string
-	Section string
-	Start   uint64
-	Offset  uint64
-	Value   uint64
+	Type         uint8
+	SegmentIndex uint32 // 段索引 (用于 iunios 运行时)
+	Segment      string
+	Section      string
+	Start        uint64
+	Offset       uint64
+	Value        uint64
+}
+
+// VMAddr 返回虚拟地址 (Start + Offset)
+func (r Rebase) VMAddr() uint64 {
+	return r.Start + r.Offset
 }
 
 func (r Rebase) String() string {
@@ -108,18 +114,24 @@ func (bs Binds) Search(name string) (*Bind, error) {
 }
 
 type Bind struct {
-	Name      string
-	Type      uint8
-	Kind      BindKind
-	Flags     uint8
-	Addend    int64
-	Segment   string
-	SegStart  uint64
-	SegOffset uint64
-	Section   string
-	Start     uint64
-	Dylib     string
-	Value     uint64
+	Name         string
+	Type         uint8
+	Kind         BindKind
+	Flags        uint8
+	Addend       int64
+	SegmentIndex uint32 // 段索引 (用于 iunios 运行时)
+	Segment      string
+	SegStart     uint64
+	SegOffset    uint64
+	Section      string
+	Start        uint64
+	Dylib        string
+	Value        uint64
+}
+
+// VMAddr 返回虚拟地址 (SegStart + SegOffset)
+func (b Bind) VMAddr() uint64 {
+	return b.SegStart + b.SegOffset
 }
 
 func (b Bind) Offset() uint64 {
@@ -285,4 +297,19 @@ func (f ExportFlag) String() string {
 		fStr += "[re-export]"
 	}
 	return strings.TrimSpace(fStr)
+}
+
+// Export 导出符号信息 (用于 iunios 运行时)
+type Export struct {
+	Name     string
+	Flags    ExportFlag
+	VMAddr   uint64
+	Resolver uint64 // 如果有 resolver
+}
+
+// DyldInfo 聚合 dyld 信息 (用于 iunios 运行时加载)
+type DyldInfo struct {
+	Rebases []Rebase
+	Binds   Binds
+	Exports []Export
 }

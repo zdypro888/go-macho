@@ -9,7 +9,15 @@ import (
 	"io"
 	"strings"
 
-	"github.com/blacktop/go-macho/internal/saferio"
+	"github.com/zdypro888/go-macho/internal/saferio"
+)
+
+// 标准 Segment 名称常量
+const (
+	SEG_PAGEZERO = "__PAGEZERO"
+	SEG_TEXT     = "__TEXT"
+	SEG_DATA     = "__DATA"
+	SEG_LINKEDIT = "__LINKEDIT"
 )
 
 /*

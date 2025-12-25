@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 //go:generate stringer -type ContextDescriptorKind,TypeReferenceKind,MetadataInitializationKind,SpecialKind,GenericParamKind,GenericRequirementLayoutKind -linecomment -output types_string.go

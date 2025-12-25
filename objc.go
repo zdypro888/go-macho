@@ -9,8 +9,8 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/blacktop/go-macho/types"
-	"github.com/blacktop/go-macho/types/objc"
+	"github.com/zdypro888/go-macho/types"
+	"github.com/zdypro888/go-macho/types/objc"
 )
 
 var ErrObjcSectionNotFound = errors.New("missing required ObjC section")

@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/blacktop/go-macho/types/swift"
+	"github.com/zdypro888/go-macho/types/swift"
 )
 
 func fullSwiftTypeName(typ *swift.Type) string {

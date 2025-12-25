@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 type Class struct {

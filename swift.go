@@ -11,9 +11,9 @@ import (
 	"strings"
 	"unicode"
 
-	swiftpkg "github.com/blacktop/go-macho/pkg/swift"
-	"github.com/blacktop/go-macho/types"
-	"github.com/blacktop/go-macho/types/swift"
+	swiftpkg "github.com/zdypro888/go-macho/pkg/swift"
+	"github.com/zdypro888/go-macho/types"
+	"github.com/zdypro888/go-macho/types/swift"
 )
 
 const sizeOfInt32 = 4

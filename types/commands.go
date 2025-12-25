@@ -13,6 +13,12 @@ type LoadCmd uint32
 
 func (c LoadCmd) Command() LoadCmd { return c }
 
+// LoadCommand 是所有 Load Command 的通用头部结构
+type LoadCommand struct {
+	Cmd LoadCmd
+	Len uint32
+}
+
 const (
 	LC_REQ_DYLD       LoadCmd = 0x80000000
 	LC_SEP            LoadCmd = 0x8000000
@@ -181,6 +187,28 @@ type Segment64 struct {
 	Flag    SegFlag      /* flags */
 }
 
+// SegmentHeader 是解析后的 Segment 头部结构（32/64位通用）
+type SegmentHeader struct {
+	LoadCmd
+	Len       uint32
+	Name      string
+	Addr      uint64       // 内存地址 (对应 VMAddr)
+	Memsz     uint64       // 内存大小 (对应 VMSize)
+	Offset    uint64       // 文件偏移 (对应 FileOff)
+	Filesz    uint64       // 文件大小 (对应 FileSize)
+	Maxprot   VmProtection // 最大保护
+	Prot      VmProtection // 初始保护 (对应 InitProt)
+	Nsect     uint32       // Section 数量
+	Flag      SegFlag      // 标志
+	Firstsect uint32       // 第一个 section 的索引
+}
+
+func (s *SegmentHeader) String() string {
+	return fmt.Sprintf(
+		"[SegmentHeader] %s, len=%#x, addr=%#x, memsz=%#x, offset=%#x, filesz=%#x, maxprot=%#x, prot=%#x, nsect=%d, flag=%#x, firstsect=%d",
+		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+}
+
 /*
  * LoadFvmLibCmd a fixed virtual shared library (filetype == MH_FVMLIB in the mach header)
  * contains a fvmlib_command (cmd == LC_IDFVMLIB) to identify the library.
@@ -228,6 +256,12 @@ type DylibCmd struct {
 	Timestamp      uint32
 	CurrentVersion Version
 	CompatVersion  Version
+}
+
+// Dylib 是解析后的动态库结构
+type Dylib struct {
+	DylibCmd
+	Name string // 动态库路径名
 }
 
 type DylibUseFlags uint32
@@ -519,6 +553,12 @@ type SymtabCmd struct {
 	Strsize uint32 // string table size in bytes
 }
 
+// Symtab 是解析后的符号表结构
+type Symtab struct {
+	SymtabCmd
+	Syms []Symbol
+}
+
 /*
  * DysymtabCmd is the second set of the symbolic information which is used to support
  * the data structures for the dynamically link editor.
@@ -665,6 +705,14 @@ type DysymtabCmd struct {
 	 */
 	Locreloff uint32 // offset to local relocation entries
 	Nlocrel   uint32 // number of local relocation entries
+}
+
+// Dysymtab 是解析后的动态符号表结构
+type Dysymtab struct {
+	DysymtabCmd
+	IndirectSyms   []uint32 // 间接符号索引
+	InternalRelocs []Reloc  // 内部重定位
+	ExternalRelocs []Reloc  // 外部重定位
 }
 
 const (
@@ -838,6 +886,12 @@ type RpathCmd struct {
 	LoadCmd           // LC_RPATH
 	Len        uint32 // includes string
 	PathOffset uint32 // path to add to run path
+}
+
+// Rpath 是解析后的运行路径结构
+type Rpath struct {
+	RpathCmd
+	Path string // 运行时路径
 }
 
 /*

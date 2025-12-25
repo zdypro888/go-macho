@@ -3,7 +3,7 @@ package swift
 import (
 	"io"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 // Flags for anonymous type context descriptors. These values are used as the

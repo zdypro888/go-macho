@@ -18,14 +18,14 @@ import (
 	"unicode"
 	"unicode/utf16"
 
-	"github.com/blacktop/go-dwarf"
+	"github.com/zdypro888/go-dwarf"
 
-	"github.com/blacktop/go-macho/internal/saferio"
-	"github.com/blacktop/go-macho/pkg/codesign"
-	"github.com/blacktop/go-macho/pkg/fixupchains"
-	"github.com/blacktop/go-macho/pkg/trie"
-	"github.com/blacktop/go-macho/pkg/xar"
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/internal/saferio"
+	"github.com/zdypro888/go-macho/pkg/codesign"
+	"github.com/zdypro888/go-macho/pkg/fixupchains"
+	"github.com/zdypro888/go-macho/pkg/trie"
+	"github.com/zdypro888/go-macho/pkg/xar"
+	"github.com/zdypro888/go-macho/types"
 )
 
 // A File represents an open Mach-O file.
@@ -51,6 +51,21 @@ type File struct {
 	sr     types.MachoReader
 	cr     types.MachoReader
 	closer io.Closer
+
+	// iunios 扩展字段 - 用于运行时加载
+	Entitlements   string            // 代码签名权限
+	Entry          uint64            // LC_MAIN 入口点
+	ThreadEntry    uint64            // LC_UNIXTHREAD 入口点
+	DynamicExports []*DynamicExport  // 动态导出符号
+	Slide          uint64            // ASLR 滑动偏移 (TEXT 段基址)
+	VMSize         uint64            // 虚拟内存总大小
+	RelocationBase uint64            // 重定位基址
+}
+
+// DynamicExport 动态导出符号
+type DynamicExport struct {
+	Name   string
+	VMAddr uint64
 }
 
 /*
@@ -229,7 +244,7 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 
 		switch cmd {
 		default:
-			log.Printf("found NEW load command: %s (please let the author know via https://github.com/blacktop/go-macho/issues)", cmd)
+			log.Printf("found NEW load command: %s (please let the author know via https://github.com/zdypro888/go-macho/issues)", cmd)
 			f.Loads = append(f.Loads, LoadCmdBytes{types.LoadCmd(cmd), LoadBytes(cmddat)})
 		case types.LC_SEGMENT:
 			var seg32 types.Segment32
@@ -273,7 +288,7 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 				if err := f.pushSection(sh, f.cr); err != nil {
 					return nil, fmt.Errorf("failed to pushSection32: %v", err)
 				}
-				s.sections = append(s.sections, sh)
+				s.Sections = append(s.Sections, sh)
 			}
 			f.Loads = append(f.Loads, s)
 		case types.LC_SEGMENT_64:
@@ -319,7 +334,7 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 				if err := f.pushSection(sh, f.cr); err != nil {
 					return nil, fmt.Errorf("failed to pushSection64: %v", err)
 				}
-				s.sections = append(s.sections, sh)
+				s.Sections = append(s.Sections, sh)
 			}
 			f.Loads = append(f.Loads, s)
 		case types.LC_SYMTAB:
@@ -545,13 +560,34 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			// TODO: parse DylibTableOfContents if Ntoc > 0
 			// TODO: parse DylibModule if Nmodtab > 0
 			// TODO: parse DylibReference if Nextrefsyms > 0
-			// TODO: parse RelocInfo if Nlocrel > 0
 			st := new(Dysymtab)
 			st.LoadBytes = cmddat
 			st.LoadCmd = cmd
 			st.Len = siz
 			st.DysymtabCmd = hdr
 			st.IndirectSyms = x
+			// 解析 local relocations (InternalRelocs)
+			if hdr.Nlocrel > 0 {
+				locrelDat, err := saferio.ReadDataAt(f.cr, uint64(hdr.Nlocrel)*8, int64(hdr.Locreloff))
+				if err != nil {
+					return nil, fmt.Errorf("failed to read local relocations at %#x: %w", hdr.Locreloff, err)
+				}
+				st.InternalRelocs, err = f.parseRelocations(locrelDat, hdr.Nlocrel, bo)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse local relocations: %w", err)
+				}
+			}
+			// 解析 external relocations (ExternalRelocs)
+			if hdr.Nextrel > 0 {
+				extrelDat, err := saferio.ReadDataAt(f.cr, uint64(hdr.Nextrel)*8, int64(hdr.Extreloff))
+				if err != nil {
+					return nil, fmt.Errorf("failed to read external relocations at %#x: %w", hdr.Extreloff, err)
+				}
+				st.ExternalRelocs, err = f.parseRelocations(extrelDat, hdr.Nextrel, bo)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse external relocations: %w", err)
+				}
+			}
 			f.Loads = append(f.Loads, st)
 			f.Dysymtab = st
 		case types.LC_LOAD_DYLIB:
@@ -1468,6 +1504,50 @@ func (f *File) pushSection(sh *types.Section, r io.ReaderAt) error {
 	}
 
 	return nil
+}
+
+// parseRelocations 解析 relocation 数据 (用于 Dysymtab 的 InternalRelocs/ExternalRelocs)
+func (f *File) parseRelocations(data []byte, count uint32, bo binary.ByteOrder) ([]types.Reloc, error) {
+	relocs := make([]types.Reloc, count)
+	b := bytes.NewReader(data)
+
+	for i := uint32(0); i < count; i++ {
+		var ri types.RelocInfo
+		if err := binary.Read(b, bo, &ri); err != nil {
+			return nil, fmt.Errorf("failed to read RelocInfo: %w", err)
+		}
+
+		rel := &relocs[i]
+		if ri.Addr&(1<<31) != 0 { // scattered
+			rel.Addr = ri.Addr & (1<<24 - 1)
+			rel.Type = uint8((ri.Addr >> 24) & (1<<4 - 1))
+			rel.Len = uint8((ri.Addr >> 28) & (1<<2 - 1))
+			rel.Pcrel = ri.Addr&(1<<30) != 0
+			rel.Value = ri.Symnum
+			rel.Scattered = true
+		} else {
+			switch bo {
+			case binary.LittleEndian:
+				rel.Addr = ri.Addr
+				rel.Value = ri.Symnum & (1<<24 - 1)
+				rel.Pcrel = ri.Symnum&(1<<24) != 0
+				rel.Len = uint8((ri.Symnum >> 25) & (1<<2 - 1))
+				rel.Extern = ri.Symnum&(1<<27) != 0
+				rel.Type = uint8((ri.Symnum >> 28) & (1<<4 - 1))
+			case binary.BigEndian:
+				rel.Addr = ri.Addr
+				rel.Value = ri.Symnum >> 8
+				rel.Pcrel = ri.Symnum&(1<<7) != 0
+				rel.Len = uint8((ri.Symnum >> 5) & (1<<2 - 1))
+				rel.Extern = ri.Symnum&(1<<4) != 0
+				rel.Type = uint8(ri.Symnum & (1<<4 - 1))
+			default:
+				return nil, fmt.Errorf("unsupported byte order")
+			}
+		}
+	}
+
+	return relocs, nil
 }
 
 func cstring(b []byte) string {
@@ -2868,6 +2948,46 @@ func (f *File) GetExports() ([]trie.TrieExport, error) {
 	return nil, nil
 }
 
+// GetDyldInfo 获取聚合的 dyld 信息 (用于 iunios 运行时加载)
+// 返回 Rebases, Binds, Exports 的聚合结构
+func (f *File) GetDyldInfo() (*types.DyldInfo, error) {
+	dyldInfo := &types.DyldInfo{}
+
+	// 获取 Rebase 信息
+	rebases, err := f.GetRebaseInfo()
+	if err != nil && err != ErrMachODyldInfoNotFound {
+		return nil, fmt.Errorf("failed to get rebase info: %w", err)
+	}
+	dyldInfo.Rebases = rebases
+
+	// 获取 Bind 信息
+	binds, err := f.GetBindInfo()
+	if err != nil && err != ErrMachODyldInfoNotFound {
+		return nil, fmt.Errorf("failed to get bind info: %w", err)
+	}
+	dyldInfo.Binds = binds
+
+	// 获取 Export 信息
+	trieExports, err := f.GetExports()
+	if err != nil && err != ErrMachODyldInfoNotFound {
+		return nil, fmt.Errorf("failed to get export info: %w", err)
+	}
+	// 转换 trie.TrieExport 到 types.Export
+	for _, te := range trieExports {
+		export := types.Export{
+			Name:   te.Name,
+			Flags:  te.Flags,
+			VMAddr: te.Address,
+		}
+		if te.Flags.StubAndResolver() {
+			export.Resolver = te.Other
+		}
+		dyldInfo.Exports = append(dyldInfo.Exports, export)
+	}
+
+	return dyldInfo, nil
+}
+
 func (f *File) parseBinds(r *bytes.Reader, kind types.BindKind) ([]types.Bind, error) {
 	var binds []types.Bind
 	var ordinalTable []types.Bind
@@ -2930,6 +3050,7 @@ func (f *File) parseBinds(r *bytes.Reader, kind types.BindKind) ([]types.Bind, e
 			if err != nil {
 				return nil, err
 			}
+			bind.SegmentIndex = uint32(imm)
 			bind.Start = f.Segments()[imm].Addr
 			bind.Segment = f.Segments()[imm].Name
 			bind.SegStart = f.Segments()[imm].Offset
@@ -3074,6 +3195,7 @@ func (f *File) parseRebase(r *bytes.Reader) ([]types.Rebase, error) {
 		case types.REBASE_OPCODE_SET_TYPE_IMM:
 			rebase.Type = imm
 		case types.REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+			rebase.SegmentIndex = uint32(imm)
 			rebase.Start = f.Segments()[imm].Addr
 			rebase.Segment = f.Segments()[imm].Name
 			rebase.Offset, err = trie.ReadUleb128(r)
@@ -3296,4 +3418,94 @@ func (f *File) SetSwiftAutoDemangle(enabled bool) {
 // SwiftAutoDemangle reports whether Swift metadata strings are automatically demangled.
 func (f *File) SwiftAutoDemangle() bool {
 	return f.swiftAutoDemangle
+}
+
+// LoadExt 加载 iunios 运行时需要的扩展信息
+// 包括: Entry, ThreadEntry, Entitlements, DynamicExports, Slide, VMSize, RelocationBase
+func (f *File) LoadExt() error {
+	// 提取 LC_MAIN 入口点
+	for _, l := range f.Loads {
+		if ep, ok := l.(*EntryPoint); ok {
+			// EntryOffset 是相对于 __TEXT 段的偏移
+			textSeg := f.Segment("__TEXT")
+			if textSeg != nil {
+				f.Entry = textSeg.Addr + ep.EntryOffset
+			} else {
+				f.Entry = ep.EntryOffset
+			}
+			break
+		}
+	}
+
+	// 提取 LC_UNIXTHREAD 入口点
+	for _, l := range f.Loads {
+		if ut, ok := l.(*UnixThread); ok {
+			f.ThreadEntry = ut.PC()
+			break
+		}
+	}
+
+	// 提取 Entitlements
+	if cs := f.CodeSignature(); cs != nil {
+		f.Entitlements = cs.Entitlements
+	}
+
+	// 提取 DynamicExports
+	if f.Dysymtab != nil && f.Symtab != nil {
+		for i := f.Dysymtab.Iextdefsym; i < f.Dysymtab.Iextdefsym+f.Dysymtab.Nextdefsym; i++ {
+			if int(i) >= len(f.Symtab.Syms) {
+				break
+			}
+			sym := f.Symtab.Syms[i]
+			vmaddr := sym.Value
+			// ARM Thumb 函数标记
+			if sym.Desc.IsArmThumbDefintion() {
+				vmaddr |= 1
+			}
+			f.DynamicExports = append(f.DynamicExports, &DynamicExport{
+				Name:   sym.Name,
+				VMAddr: vmaddr,
+			})
+		}
+	}
+
+	// 计算 Slide, VMSize, RelocationBase
+	var vmaddrMin uint64 = ^uint64(0) // MaxUint64
+	var vmaddrMax uint64
+	var segActualLoadAddress uint64 = ^uint64(0)
+	var firstWritableSegmentAddress uint64
+
+	for _, seg := range f.Segments() {
+		if seg.Name == "__PAGEZERO" {
+			continue
+		}
+		if seg.Name == "__TEXT" {
+			f.Slide = seg.Addr
+		}
+		if vmaddrMin > seg.Addr {
+			vmaddrMin = seg.Addr
+		}
+		if vmaddrMax < (seg.Addr + seg.Memsz) {
+			vmaddrMax = seg.Addr + seg.Memsz
+		}
+		if seg.Addr < segActualLoadAddress {
+			segActualLoadAddress = seg.Addr
+		}
+		if firstWritableSegmentAddress == 0 && seg.Prot.Write() {
+			firstWritableSegmentAddress = seg.Addr
+		}
+	}
+
+	if vmaddrMin != ^uint64(0) && vmaddrMax > vmaddrMin {
+		f.VMSize = vmaddrMax - vmaddrMin
+	}
+
+	// MH_SPLIT_SEGS 标志检查
+	if f.FileHeader.Flags.SplitSegs() {
+		f.RelocationBase = firstWritableSegmentAddress
+	} else {
+		f.RelocationBase = segActualLoadAddress
+	}
+
+	return nil
 }

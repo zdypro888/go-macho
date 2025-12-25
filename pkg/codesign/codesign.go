@@ -12,8 +12,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/blacktop/go-macho/pkg/codesign/types"
-	mtypes "github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/pkg/codesign/types"
+	mtypes "github.com/zdypro888/go-macho/types"
 )
 
 // CodeSignature object

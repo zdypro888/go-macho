@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 // ErrNoFixupAtOffset is returned when no fixup exists at the specified file offset.

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/blacktop/go-macho/internal/saferio"
-	"github.com/blacktop/go-macho/pkg/codesign"
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/internal/saferio"
+	"github.com/zdypro888/go-macho/pkg/codesign"
+	"github.com/zdypro888/go-macho/types"
 )
 
 // A Load represents any Mach-O load command.
@@ -87,34 +87,15 @@ func pointerAlign(sz uint32) uint32 {
  * SEGMENT
  *******************************************************************************/
 
-// A SegmentHeader is the header for a Mach-O 32-bit or 64-bit load segment command.
-type SegmentHeader struct {
-	types.LoadCmd
-	Len       uint32
-	Name      string
-	Addr      uint64
-	Memsz     uint64
-	Offset    uint64
-	Filesz    uint64
-	Maxprot   types.VmProtection
-	Prot      types.VmProtection
-	Nsect     uint32
-	Flag      types.SegFlag
-	Firstsect uint32
-}
-
-func (s *SegmentHeader) String() string {
-	return fmt.Sprintf(
-		"[SegmentHeader] %s, len=%#x, addr=%#x, memsz=%#x, offset=%#x, filesz=%#x, maxprot=%#x, prot=%#x, nsect=%d, flag=%#x, firstsect=%d",
-		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
-}
+// SegmentHeader 使用 types.SegmentHeader
+type SegmentHeader = types.SegmentHeader
 
 // A Segment represents a Mach-O 32-bit or 64-bit load segment command.
 type Segment struct {
 	SegmentHeader
 	LoadBytes
 
-	sections []*types.Section
+	Sections []*types.Section // 公开字段，供外部访问
 
 	// Embed ReaderAt for ReadAt method.
 	// Do not embed SectionReader directly
@@ -287,7 +268,7 @@ func (s *Segment) MarshalJSON() ([]byte, error) {
 		Prot:     s.SegmentHeader.Prot.String(),
 		Nsect:    s.SegmentHeader.Nsect,
 		Flags:    s.SegmentHeader.Flag.List(),
-		Sections: s.sections,
+		Sections: s.Sections,
 	})
 }
 
@@ -640,6 +621,37 @@ func (t *Thread) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// PC 返回线程的程序计数器 (入口点地址)
+func (t *Thread) PC() uint64 {
+	for _, thread := range t.Threads {
+		var flavor any
+		if t.IsArm {
+			flavor = types.ArmThreadFlavor(thread.Flavor)
+		} else {
+			flavor = types.X86ThreadFlavor(thread.Flavor)
+		}
+		switch flavor {
+		case types.X86_THREAD_STATE32:
+			var regs Regs386
+			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
+			return uint64(regs.IP)
+		case types.X86_THREAD_STATE64:
+			var regs RegsAMD64
+			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
+			return regs.IP
+		case types.ARM_THREAD_STATE32:
+			var regs RegsARM
+			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
+			return uint64(regs.PC)
+		case types.ARM_THREAD_STATE64:
+			var regs RegsARM64
+			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
+			return regs.PC
+		}
+	}
+	return 0
+}
+
 /*******************************************************************************
  * LC_UNIXTHREAD
  *******************************************************************************/
@@ -845,7 +857,9 @@ func (c *Prepage) MarshalJSON() ([]byte, error) {
 type Dysymtab struct {
 	LoadBytes
 	types.DysymtabCmd
-	IndirectSyms []uint32 // indices into Symtab.Syms
+	IndirectSyms   []uint32      // indices into Symtab.Syms
+	InternalRelocs []types.Reloc // local relocations (from Locreloff)
+	ExternalRelocs []types.Reloc // external relocations (from Extreloff)
 }
 
 func (d *Dysymtab) LoadSize() uint32 {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	mtypes "github.com/blacktop/go-macho/types"
+	mtypes "github.com/zdypro888/go-macho/types"
 )
 
 var (

@@ -11,8 +11,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/blacktop/go-macho/internal/saferio"
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/internal/saferio"
+	"github.com/zdypro888/go-macho/types"
 )
 
 const (

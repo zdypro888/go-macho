@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 const IsDyldPreoptimized = 1 << 7

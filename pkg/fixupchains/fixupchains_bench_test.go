@@ -8,9 +8,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/blacktop/go-macho"
-	fixupchains "github.com/blacktop/go-macho/pkg/fixupchains"
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho"
+	fixupchains "github.com/zdypro888/go-macho/pkg/fixupchains"
+	"github.com/zdypro888/go-macho/types"
 )
 
 type mockMachoReader struct {

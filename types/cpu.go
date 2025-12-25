@@ -9,6 +9,9 @@ const (
 	cpuArchMask = 0xff000000 //  mask for architecture bits
 	cpuArch64   = 0x01000000 // 64 bit ABI
 	cpuArch6432 = 0x02000000 // ABI for 64-bit hardware with 32-bit types; LP32
+
+	// 导出的常量
+	CPUArch64 = cpuArch64
 )
 
 const (

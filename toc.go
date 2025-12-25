@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 type FileTOC struct {
@@ -163,7 +163,7 @@ func (ls loads) String() string {
 	for i, l := range ls {
 		if sg, ok := l.(*Segment); ok {
 			loadsStr += fmt.Sprintf("%03d: %s\n", i, sg)
-			for _, sc := range sg.sections {
+			for _, sc := range sg.Sections {
 				loadsStr += fmt.Sprintf("%s\n", sc)
 			}
 		} else {

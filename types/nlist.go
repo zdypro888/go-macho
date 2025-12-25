@@ -576,3 +576,12 @@ func (t NType) IsSecondStabEntry() bool {
 func (t NType) IsPascalSymbol() bool {
 	return t == N_PC
 }
+
+// Symbol 是解析后的符号表条目（32/64位通用）
+type Symbol struct {
+	Name  string
+	Type  NType
+	Sect  uint8
+	Desc  NDescType
+	Value uint64
+}

@@ -16,10 +16,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blacktop/go-dwarf"
-	"github.com/blacktop/go-macho/internal/obscuretestdata"
-	cstypes "github.com/blacktop/go-macho/pkg/codesign/types"
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-dwarf"
+	"github.com/zdypro888/go-macho/internal/obscuretestdata"
+	cstypes "github.com/zdypro888/go-macho/pkg/codesign/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 type fileTest struct {

@@ -3,7 +3,7 @@ package fixupchains
 import (
 	"fmt"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 // ImportFormat are values for dyld_chained_fixups_header.imports_format

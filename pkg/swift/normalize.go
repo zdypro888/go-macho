@@ -3,7 +3,7 @@ package swift
 import (
 	"strings"
 
-	typeswift "github.com/blacktop/go-macho/types/swift"
+	typeswift "github.com/zdypro888/go-macho/types/swift"
 )
 
 var methodPrefixes = []string{"func ", "method ", "getter ", "setter ", "modify ", "init "}

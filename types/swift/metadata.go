@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/types"
 )
 
 //go:generate stringer -type MetadataKind -linecomment -output metadata_string.go

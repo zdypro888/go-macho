@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/blacktop/go-macho/pkg/codesign"
-	ctypes "github.com/blacktop/go-macho/pkg/codesign/types"
-	"github.com/blacktop/go-macho/pkg/fixupchains"
-	"github.com/blacktop/go-macho/pkg/trie"
-	"github.com/blacktop/go-macho/types"
+	"github.com/zdypro888/go-macho/pkg/codesign"
+	ctypes "github.com/zdypro888/go-macho/pkg/codesign/types"
+	"github.com/zdypro888/go-macho/pkg/fixupchains"
+	"github.com/zdypro888/go-macho/pkg/trie"
+	"github.com/zdypro888/go-macho/types"
 )
 
 var reexportDeps uint64
@@ -1100,7 +1100,7 @@ func (f *File) writeLoadCommands(buf *bytes.Buffer) error {
 			if err := seg.Write(buf, f.ByteOrder); err != nil {
 				return err
 			}
-			for _, sect := range seg.sections {
+			for _, sect := range seg.Sections {
 				if err := f.Section(sect.Seg, sect.Name).Write(buf, f.ByteOrder); err != nil {
 					return err
 				}
