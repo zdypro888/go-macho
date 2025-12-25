@@ -129,11 +129,12 @@ type Bind struct {
 	Value        uint64
 }
 
-// VMAddr 返回虚拟地址 (SegStart + SegOffset)
+// VMAddr 返回虚拟地址 (Start + SegOffset)
 func (b Bind) VMAddr() uint64 {
-	return b.SegStart + b.SegOffset
+	return b.Start + b.SegOffset
 }
 
+// Offset 返回文件偏移 (SegStart + SegOffset)
 func (b Bind) Offset() uint64 {
 	return b.SegStart + b.SegOffset
 }

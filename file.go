@@ -1430,7 +1430,7 @@ func (f *File) parseSymtab(symdat, strtab, cmddat []byte, hdr *types.SymtabCmd, 
 		if n.Name < uint32(len(strtab)) {
 			// We add "_" to Go symbols. Strip it here. See issue 33808.
 			name = cstring(strtab[n.Name:])
-			if name[0] == '_' {
+			if len(name) > 0 && name[0] == '_' {
 				if strings.Contains(name, ".") {
 					name = name[1:]
 				} else {
@@ -3000,7 +3000,8 @@ func (f *File) parseBinds(r *bytes.Reader, kind types.BindKind) ([]types.Bind, e
 	var segOffset uint64
 
 	useThreadedRebaseBind := false
-	bind := types.Bind{Kind: kind}
+	// 默认 Type 为 BIND_TYPE_POINTER (lazy bind 通常不设置 type)
+	bind := types.Bind{Kind: kind, Type: types.BIND_TYPE_POINTER}
 
 	for {
 		ptr, err := r.ReadByte()
@@ -3020,7 +3021,7 @@ func (f *File) parseBinds(r *bytes.Reader, kind types.BindKind) ([]types.Bind, e
 			if kind != types.LAZY_KIND {
 				return binds, nil
 			}
-			bind = types.Bind{Kind: kind}
+			bind = types.Bind{Kind: kind, Type: types.BIND_TYPE_POINTER}
 		case types.BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
 			bind.Dylib = f.LibraryOrdinalName(int(imm))
 		case types.BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
