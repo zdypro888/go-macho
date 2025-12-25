@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf16"
 
+	"github.com/ianlancetaylor/demangle"
 	"github.com/zdypro888/go-dwarf"
 
 	"github.com/zdypro888/go-macho/internal/saferio"
@@ -53,13 +54,13 @@ type File struct {
 	closer io.Closer
 
 	// iunios 扩展字段 - 用于运行时加载
-	Entitlements   string            // 代码签名权限
-	Entry          uint64            // LC_MAIN 入口点
-	ThreadEntry    uint64            // LC_UNIXTHREAD 入口点
-	DynamicExports []*DynamicExport  // 动态导出符号
-	Slide          uint64            // ASLR 滑动偏移 (TEXT 段基址)
-	VMSize         uint64            // 虚拟内存总大小
-	RelocationBase uint64            // 重定位基址
+	Entitlements   string           // 代码签名权限
+	Entry          uint64           // LC_MAIN 入口点
+	ThreadEntry    uint64           // LC_UNIXTHREAD 入口点
+	DynamicExports []*DynamicExport // 动态导出符号
+	Slide          uint64           // ASLR 滑动偏移 (TEXT 段基址)
+	VMSize         uint64           // 虚拟内存总大小
+	RelocationBase uint64           // 重定位基址
 }
 
 // DynamicExport 动态导出符号
@@ -1429,8 +1430,12 @@ func (f *File) parseSymtab(symdat, strtab, cmddat []byte, hdr *types.SymtabCmd, 
 		if n.Name < uint32(len(strtab)) {
 			// We add "_" to Go symbols. Strip it here. See issue 33808.
 			name = cstring(strtab[n.Name:])
-			if strings.Contains(name, ".") && name[0] == '_' {
-				name = name[1:]
+			if name[0] == '_' {
+				if strings.Contains(name, ".") {
+					name = name[1:]
+				} else {
+					name = demangle.Filter(name[1:])
+				}
 			}
 		}
 		symtab = append(symtab, Symbol{
@@ -3035,7 +3040,18 @@ func (f *File) parseBinds(r *bytes.Reader, kind types.BindKind) ([]types.Bind, e
 			if err != nil {
 				return nil, err
 			}
-			bind.Name = strings.Trim(s, "\x00")
+			name := strings.Trim(s, "\x00")
+			// 处理符号名称：去掉前缀并进行 demangle
+			if len(name) > 0 && name[0] == '_' {
+				if strings.Contains(name, ".") {
+					// Go 符号包含点号，仅去掉前缀
+					name = name[1:]
+				} else {
+					// C++/Swift 等符号，进行 demangle
+					name = demangle.Filter(name[1:])
+				}
+			}
+			bind.Name = name
 			bind.Flags = imm
 		case types.BIND_OPCODE_SET_TYPE_IMM:
 			bind.Type = imm
