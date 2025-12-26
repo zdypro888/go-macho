@@ -1160,3 +1160,42 @@ func (dcf *DyldChainedFixups) readAndDecodeFixup(format DCPtrKind, fixupLocation
 
 	return nil, fmt.Errorf("failed to decode fixup for format %d", format)
 }
+
+// IsVMOffsetFormat 判断当前 PointerFormat 的 rebase target 是否为 vm offset
+// 返回 true 表示 target 是相对于 preferredLoadAddress 的偏移
+// 返回 false 表示 target 已经是绝对虚拟地址
+func (dcf *DyldChainedFixups) IsVMOffsetFormat() bool {
+	switch dcf.PointerFormat {
+	// 根据 types.go 中的注释，这些格式的 target 是 vm offset
+	case DYLD_CHAINED_PTR_64_OFFSET,           // "target is vm offset"
+		DYLD_CHAINED_PTR_ARM64E_KERNEL,         // "unauth target is vm offset"
+		DYLD_CHAINED_PTR_ARM64E_USERLAND,       // "unauth target is vm offset"
+		DYLD_CHAINED_PTR_ARM64E_USERLAND24,     // "unauth target is vm offset"
+		DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE,   // "targets both vm offsets"
+		DYLD_CHAINED_PTR_ARM64E_SEGMENTED,      // "rebase offsets use segIndex and segOffset"
+		DYLD_CHAINED_PTR_64_KERNEL_CACHE,       // kernel cache uses offset
+		DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE:   // x86_64 kernel cache uses offset
+		return true
+	default:
+		// 这些格式的 target 是 vmaddr（绝对地址）
+		// DYLD_CHAINED_PTR_ARM64E: "unauth target is vmaddr"
+		// DYLD_CHAINED_PTR_64: "target is vmaddr"
+		// DYLD_CHAINED_PTR_ARM64E_FIRMWARE: "unauth target is vmaddr"
+		// DYLD_CHAINED_PTR_32, DYLD_CHAINED_PTR_32_CACHE, DYLD_CHAINED_PTR_32_FIRMWARE
+		return false
+	}
+}
+
+// GetRebaseVMAddress 返回 rebase 的最终虚拟地址，用于写入内存
+// preferredLoadAddress: 通常是 __TEXT 段的首选加载地址（从 Mach-O 文件中读取）
+// slide: ASLR 滑动值（实际加载地址 - 首选加载地址），如果不使用 ASLR 则传 0
+func (dcf *DyldChainedFixups) GetRebaseVMAddress(rebase Rebase, preferredLoadAddress uint64, slide uint64) uint64 {
+	target := rebase.Target()
+	if dcf.IsVMOffsetFormat() {
+		// target 是 vm offset，需要加上 preferredLoadAddress
+		target += preferredLoadAddress
+	}
+	// 加上 ASLR slide
+	target += slide
+	return target
+}
