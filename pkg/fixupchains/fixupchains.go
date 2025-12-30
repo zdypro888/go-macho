@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ianlancetaylor/demangle"
 	"github.com/zdypro888/go-macho/types"
 )
 
@@ -704,8 +705,19 @@ func (dcf *DyldChainedFixups) parseImports() error {
 		if err != nil {
 			return fmt.Errorf("failed to read string at: %d: %v", uint64(dcf.SymbolsOffset)+i.NameOffset(), err)
 		}
+		// 处理符号名称：去掉前缀并进行 demangle
+		name := strings.Trim(s, "\x00")
+		if len(name) > 0 && name[0] == '_' {
+			if strings.Contains(name, ".") {
+				// Go 符号包含点号，仅去掉前缀
+				name = name[1:]
+			} else {
+				// C++/Swift 等符号，进行 demangle
+				name = demangle.Filter(name[1:])
+			}
+		}
 		dcf.Imports = append(dcf.Imports, DcfImport{
-			Name:   strings.Trim(s, "\x00"),
+			Name:   name,
 			Import: i,
 		})
 	}
