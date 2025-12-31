@@ -360,7 +360,7 @@ func parseCodeDirectory(r *bytes.Reader, offset uint32) (*types.CodeDirectory, e
 			// TODO: what IS linkage
 		}
 	}
-	// Parse Indentity
+	// Parse Identity
 	r.Seek(int64(offset+cd.Header.IdentOffset), io.SeekStart)
 	id, err := bufio.NewReader(r).ReadString('\x00')
 	if err != nil {
