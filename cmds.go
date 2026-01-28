@@ -639,7 +639,7 @@ func (t *Thread) PC() uint64 {
 			var regs RegsAMD64
 			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
 			return regs.IP
-		case types.ARM_THREAD_STATE32:
+		case types.ARM_THREAD_STATE, types.ARM_THREAD_STATE32:
 			var regs RegsARM
 			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
 			return uint64(regs.PC)
