@@ -721,9 +721,10 @@ func (d DyldChainedPtrArm64eAuthBind24) String(baseAddr ...uint64) string {
 
 // DYLD_CHAINED_PTR_64
 type DyldChainedPtr64Bind struct {
-	Fixup   uint64
-	Pointer uint64
-	Import  string
+	Fixup        uint64
+	Pointer      uint64
+	Import       string
+	ImportAddend int64 // addend from import table (DYLD_CHAINED_IMPORT_ADDEND / ADDEND64)
 }
 
 func (d DyldChainedPtr64Bind) IsRebase() bool {
@@ -739,7 +740,8 @@ func (d DyldChainedPtr64Bind) Ordinal() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 0, 24)
 }
 func (d DyldChainedPtr64Bind) Addend() uint64 {
-	return types.ExtractBits(uint64(d.Pointer), 24, 8) // 0 thru 255
+	inlineAddend := types.ExtractBits(uint64(d.Pointer), 24, 8) // 0 thru 255
+	return inlineAddend + uint64(d.ImportAddend)
 }
 func (d DyldChainedPtr64Bind) Reserved() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 32, 19) // all zeros

@@ -424,6 +424,7 @@ func (dcf *DyldChainedFixups) walkDcFixupChain(segIdx int, pageIndex uint16, off
 				bind := DyldChainedPtr64Bind{Pointer: dcPtr64, Fixup: fixupLocation}
 				if ord := bind.Ordinal(); ord < uint64(len(dcf.Imports)) {
 					bind.Import = dcf.Imports[ord].Name
+					bind.ImportAddend = int64(dcf.Imports[ord].Addend())
 				}
 				dcf.Starts[segIdx].Fixups = append(dcf.Starts[segIdx].Fixups, bind)
 			} else {
@@ -447,6 +448,7 @@ func (dcf *DyldChainedFixups) walkDcFixupChain(segIdx int, pageIndex uint16, off
 				bind := DyldChainedPtr64Bind{Pointer: dcPtr64, Fixup: fixupLocation}
 				if ord := bind.Ordinal(); ord < uint64(len(dcf.Imports)) {
 					bind.Import = dcf.Imports[ord].Name
+					bind.ImportAddend = int64(dcf.Imports[ord].Addend())
 				}
 				dcf.Starts[segIdx].Fixups = append(dcf.Starts[segIdx].Fixups, bind)
 			} else {
@@ -1072,6 +1074,7 @@ func (dcf *DyldChainedFixups) readAndDecodeFixup(format DCPtrKind, fixupLocation
 			bind := DyldChainedPtr64Bind{Pointer: raw, Fixup: fixupLocation}
 			if ord := bind.Ordinal(); ord < uint64(len(dcf.Imports)) {
 				bind.Import = dcf.Imports[ord].Name
+				bind.ImportAddend = int64(dcf.Imports[ord].Addend())
 			}
 			return bind, nil
 		}
@@ -1082,6 +1085,7 @@ func (dcf *DyldChainedFixups) readAndDecodeFixup(format DCPtrKind, fixupLocation
 			bind := DyldChainedPtr64Bind{Pointer: raw, Fixup: fixupLocation}
 			if ord := bind.Ordinal(); ord < uint64(len(dcf.Imports)) {
 				bind.Import = dcf.Imports[ord].Name
+				bind.ImportAddend = int64(dcf.Imports[ord].Addend())
 			}
 			return bind, nil
 		}
