@@ -713,6 +713,8 @@ func (dcf *DyldChainedFixups) parseImports() error {
 			if strings.Contains(name, ".") {
 				// Go 符号包含点号，仅去掉前缀
 				name = name[1:]
+			} else if strings.HasPrefix(name, "_OBJC_CLASS_$_") || strings.HasPrefix(name, "_OBJC_METACLASS_$_") {
+				// ObjC class/metaclass 符号，保留原始名不 demangle
 			} else {
 				// C++/Swift 等符号，进行 demangle
 				name = demangle.Filter(name[1:])
