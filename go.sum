@@ -1,4 +1,4 @@
 github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f h1:NW3E2QSchEk63/fjeEvWOa2cE02FSv9ox//VE/N4c8g=
 github.com/ianlancetaylor/demangle v0.0.0-20260505044615-1ff4bf46051f/go.mod h1:gx7rwoVhcfuVKG5uya9Hs3Sxj7EIvldVofAWIUtGouw=
-github.com/zdypro888/go-dwarf v0.0.0-20250915084858-d2c329ee4314 h1:jj/quSn3RsmAxBbvNEFWz/daAtbwldeKhi2Z9ki9INs=
-github.com/zdypro888/go-dwarf v0.0.0-20250915084858-d2c329ee4314/go.mod h1:Q6OhDHzE0AFtkM9QjwHH6MUCb5Gm1mp5dOy9RgvgxQ8=
+github.com/zdypro888/go-dwarf v0.0.0-20260610033742-0d5529c1af5d h1:ybJD1aIjt6gJqsGoeLWsIfR8um/aZlWJNqP97Paf/rA=
+github.com/zdypro888/go-dwarf v0.0.0-20260610033742-0d5529c1af5d/go.mod h1:ZMN53E9O6vn2Nb2O7VAm7s3FqMMQx+4fWFxauKsaPHA=
