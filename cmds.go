@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/zdypro888/go-macho/internal/saferio"
 	"github.com/zdypro888/go-macho/pkg/codesign"
+	"github.com/zdypro888/go-macho/pkg/fixupchains"
 	"github.com/zdypro888/go-macho/types"
 )
 
@@ -45,19 +47,20 @@ func (s LoadCmdBytes) Copy() LoadCmdBytes {
 type LoadBytes []byte
 
 func (b LoadBytes) String() string {
-	s := "["
+	var s strings.Builder
+	s.WriteString("[")
 	for i, a := range b {
 		if i > 0 {
-			s += " "
+			s.WriteString(" ")
 			if len(b) > 48 && i >= 16 {
-				s += fmt.Sprintf("... (%d bytes)", len(b))
+				s.WriteString(fmt.Sprintf("... (%d bytes)", len(b)))
 				break
 			}
 		}
-		s += fmt.Sprintf("%x", a)
+		s.WriteString(fmt.Sprintf("%x", a))
 	}
-	s += "]"
-	return s
+	s.WriteString("]")
+	return s.String()
 }
 func (b LoadBytes) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
@@ -351,11 +354,12 @@ func (s *Symtab) MarshalJSON() ([]byte, error) {
 
 // A Symbol is a Mach-O 32-bit or 64-bit symbol table entry.
 type Symbol struct {
-	Name  string
-	Type  types.NType
-	Sect  uint8
-	Desc  types.NDescType
-	Value uint64
+	Name         string
+	IndirectName string
+	Type         types.NType
+	Sect         uint8
+	Desc         types.NDescType
+	Value        uint64
 }
 
 func (s Symbol) GetType(m *File) string {
@@ -446,7 +450,9 @@ func (s Symbol) GetType(m *File) string {
 	}
 
 	if s.Type.IsIndirectSym() {
-		// typ += fmt.Sprintf("(for %s)", s.Name) FIXME: find indirect symbol example
+		if s.IndirectName != "" {
+			typ += fmt.Sprintf("(for %s) ", s.IndirectName)
+		}
 	}
 
 	return strings.TrimSpace(typ)
@@ -475,17 +481,19 @@ func (s Symbol) String(m *File) string {
 }
 func (s *Symbol) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
-		Name  string `json:"name"`
-		Type  string `json:"type"`
-		Sect  uint8  `json:"sect"`
-		Desc  string `json:"desc"`
-		Value uint64 `json:"value"`
+		Name         string `json:"name"`
+		IndirectName string `json:"indirect_name,omitempty"`
+		Type         string `json:"type"`
+		Sect         uint8  `json:"sect"`
+		Desc         string `json:"desc"`
+		Value        uint64 `json:"value"`
 	}{
-		Name:  s.Name,
-		Type:  s.Type.String(fmt.Sprintf("sect_num=%d", s.Sect)),
-		Sect:  s.Sect,
-		Desc:  s.Desc.String(),
-		Value: s.Value,
+		Name:         s.Name,
+		IndirectName: s.IndirectName,
+		Type:         s.Type.String(fmt.Sprintf("sect_num=%d", s.Sect)),
+		Sect:         s.Sect,
+		Desc:         s.Desc.String(),
+		Value:        s.Value,
 	})
 }
 
@@ -572,37 +580,42 @@ func (t *Thread) String() string {
 		switch flavor {
 		case types.X86_THREAD_STATE32:
 			var regs Regs386
-			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
-			out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
-		case types.X86_THREAD_STATE64:
-			var regs RegsAMD64
-			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
-			out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
-		case types.ARM_THREAD_STATE32:
-			var regs RegsARM
-			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
-			if regs.OnlyEntry() {
-				out = append(out, fmt.Sprintf("%s%s Entry: %#08x", padding, flavor, regs.PC))
-			} else {
+			if err := binary.Read(bytes.NewReader(thread.Data), t.bo, &regs); err == nil {
 				out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
 			}
-			out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+		case types.X86_THREAD_STATE64:
+			var regs RegsAMD64
+			if err := binary.Read(bytes.NewReader(thread.Data), t.bo, &regs); err == nil {
+				out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+			}
+		case types.ARM_THREAD_STATE32:
+			var regs RegsARM
+			if err := binary.Read(bytes.NewReader(thread.Data), t.bo, &regs); err == nil {
+				if regs.OnlyEntry() {
+					out = append(out, fmt.Sprintf("%s%s Entry: %#08x", padding, flavor, regs.PC))
+				} else {
+					out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+				}
+			}
 		case types.ARM_THREAD_STATE64:
 			var regs RegsARM64
-			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
-			if regs.OnlyEntry() {
-				out = append(out, fmt.Sprintf("%s%s Entry: %#016x", padding, flavor, regs.PC))
-			} else {
-				out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+			if err := binary.Read(bytes.NewReader(thread.Data), t.bo, &regs); err == nil {
+				if regs.OnlyEntry() {
+					out = append(out, fmt.Sprintf("%s%s Entry: %#016x", padding, flavor, regs.PC))
+				} else {
+					out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+				}
 			}
 		case types.ARM_EXCEPTION_STATE:
 			var regs ArmExceptionState
-			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
-			out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+			if err := binary.Read(bytes.NewReader(thread.Data), t.bo, &regs); err == nil {
+				out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+			}
 		case types.ARM_EXCEPTION_STATE64:
 			var regs ArmExceptionState64
-			binary.Read(bytes.NewReader(thread.Data), t.bo, &regs)
-			out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+			if err := binary.Read(bytes.NewReader(thread.Data), t.bo, &regs); err == nil {
+				out = append(out, fmt.Sprintf("%s%s:\n%s", padding, flavor, regs.String(regPadding)))
+			}
 		default:
 			out = append(out, fmt.Sprintf("%s%s", padding, flavor))
 		}
@@ -1490,7 +1503,7 @@ func (l *CodeSignature) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
 	return nil
 }
 func (l *CodeSignature) String() string { // TODO: add more info
-	return fmt.Sprintf("offset=0x%09x  size=%#x", l.Offset, l.Size)
+	return fmt.Sprintf("offset=0x%09x size=%#x", l.Offset, l.Size)
 }
 func (l *CodeSignature) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -1529,7 +1542,7 @@ func (l *SplitInfo) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
 	return nil
 }
 func (s *SplitInfo) String() string {
-	version := "format=v1"
+	var version string
 	if s.Version == types.DYLD_CACHE_ADJ_V2_FORMAT {
 		version = "format=v2"
 	} else {
@@ -1940,9 +1953,9 @@ func (e *EncryptionInfo64) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
 }
 func (e *EncryptionInfo64) String() string {
 	if e.CryptID == 0 {
-		return fmt.Sprintf("offset=0x%09x  size=%#x (not-encrypted yet)", e.Offset, e.Size)
+		return fmt.Sprintf("offset=0x%09x size=%#x (not-encrypted yet)", e.Offset, e.Size)
 	}
-	return fmt.Sprintf("offset=0x%09x  size=%#x CryptID: %#x", e.Offset, e.Size, e.CryptID)
+	return fmt.Sprintf("offset=0x%09x size=%#x CryptID: %#x", e.Offset, e.Size, e.CryptID)
 }
 func (e *EncryptionInfo64) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -2056,7 +2069,8 @@ func (n *Note) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
 func (n *Note) String() string {
 	var note string
 	padding := strings.Repeat(" ", 7)
-	switch string(bytes.Trim(n.DataOwner[:], "\x00")) {
+	owner := string(bytes.Trim(n.DataOwner[:], "\x00"))
+	switch owner {
 	case "addrable bits":
 		var version uint32
 		if err := binary.Read(bytes.NewReader(n.Data), n.bo, &version); err == nil {
@@ -2107,7 +2121,11 @@ func (n *Note) String() string {
 		note = strings.TrimSuffix(note, "\n")
 	}
 
-	return fmt.Sprintf("DataOwner: \"%s\", offset=0x%08x-0x%08x size=%5d\n%s", string(n.DataOwner[:]), n.Offset, n.Offset+n.Size, n.Size, note)
+	base := fmt.Sprintf("offset=0x%08x-0x%08x size=%3d DataOwner: %q", n.Offset, n.Offset+n.Size, n.Size, owner)
+	if note == "" {
+		return base
+	}
+	return base + "\n" + note
 }
 func (n *Note) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -2271,6 +2289,184 @@ type AtomInfo struct {
 
 type FunctionVariants struct {
 	LinkEditData
+	Data *types.FuncVarData
+}
+
+func (l *FunctionVariants) String() string {
+	if l.Data == nil || len(l.Data.Tables) == 0 {
+		return fmt.Sprintf("offset=0x%09x size=0x%x", l.Offset, l.Size)
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "offset=0x%09x size=0x%x", l.Offset, l.Size)
+	for i, table := range l.Data.Tables {
+		fmt.Fprintf(&out, "\n\t\ttable #%d", i)
+		fmt.Fprintf(&out, "\n\t\t  namespace: %s", table.Kind)
+		maxFlagLen := 0
+		for _, entry := range table.Entries {
+			flags := entry.GetFlags()
+			var flagStrs []string
+			for _, f := range flags {
+				flagStrs = append(flagStrs, types.FuncVarFlagName(table.Kind, f))
+			}
+			flagsDesc := strings.Join(flagStrs, ", ")
+			if len(flagStrs) == 0 {
+				flagsDesc = "default"
+			}
+			flagInfo := fmt.Sprintf("flag: 0x%02X (%q)", entry.FlagBitNums[0], flagsDesc)
+			if len(flagInfo) > maxFlagLen {
+				maxFlagLen = len(flagInfo)
+			}
+		}
+		for _, entry := range table.Entries {
+			// Get flag names
+			flags := entry.GetFlags()
+			var flagStrs []string
+			for _, f := range flags {
+				flagStrs = append(flagStrs, types.FuncVarFlagName(table.Kind, f))
+			}
+			flagsDesc := strings.Join(flagStrs, ", ")
+			if len(flagStrs) == 0 {
+				flagsDesc = "default"
+			}
+			flagInfo := fmt.Sprintf("flag: 0x%02X (%q)", entry.FlagBitNums[0], flagsDesc)
+			// Format: function address flags symbol
+			if entry.Symbol != "" {
+				fmt.Fprintf(&out, "\n\t\t   function: 0x%08X %-*s %s",
+					entry.ImplValue(), maxFlagLen, flagInfo, entry.Symbol)
+			} else {
+				fmt.Fprintf(&out, "\n\t\t   function: 0x%08X %s",
+					entry.ImplValue(), flagInfo)
+			}
+		}
+	}
+	return out.String()
+}
+func (l *FunctionVariants) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		LoadCmd string             `json:"load_cmd"`
+		Len     uint32             `json:"length"`
+		Offset  uint32             `json:"offset"`
+		Size    uint32             `json:"size"`
+		Data    *types.FuncVarData `json:"data,omitempty"`
+	}{
+		LoadCmd: l.Command().String(),
+		Len:     l.Len,
+		Offset:  l.Offset,
+		Size:    l.Size,
+		Data:    l.Data,
+	})
+}
+
+// ParseFunctionVariants parses the LC_FUNCTION_VARIANTS payload data
+func ParseFunctionVariants(data []byte, bo binary.ByteOrder) (*types.FuncVarData, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("function variants data too small: %d bytes", len(data))
+	}
+
+	r := bytes.NewReader(data)
+
+	var tableCount uint32
+	if err := binary.Read(r, bo, &tableCount); err != nil {
+		return nil, fmt.Errorf("failed to read table count: %v", err)
+	}
+
+	if tableCount == 0 {
+		return &types.FuncVarData{}, nil
+	}
+	if uint64(tableCount) > uint64(len(data)-4)/4 {
+		return nil, fmt.Errorf("function variants table count %d exceeds %d-byte payload", tableCount, len(data))
+	}
+	headerEnd := uint64(4) + uint64(tableCount)*4
+	if headerEnd >= uint64(len(data)) {
+		return nil, fmt.Errorf("function variants offset table ends at %d without a runtime table", headerEnd)
+	}
+
+	// Read table offsets
+	tableOffsets := make([]uint32, tableCount)
+	for i := uint32(0); i < tableCount; i++ {
+		if err := binary.Read(r, bo, &tableOffsets[i]); err != nil {
+			return nil, fmt.Errorf("failed to read table offset %d: %v", i, err)
+		}
+	}
+
+	result := &types.FuncVarData{
+		Tables: make([]types.FuncVarTable, tableCount),
+	}
+
+	// Parse each table
+	for i, offset := range tableOffsets {
+		start := uint64(offset)
+		if start < headerEnd {
+			return nil, fmt.Errorf("table %d offset %d overlaps header ending at %d", i, offset, headerEnd)
+		}
+		if start >= uint64(len(data)) {
+			return nil, fmt.Errorf("table %d offset %d exceeds data size %d", i, offset, len(data))
+		}
+		end := uint64(len(data))
+		if i+1 < len(tableOffsets) {
+			end = uint64(tableOffsets[i+1])
+			if end <= start {
+				return nil, fmt.Errorf("table offsets are not strictly increasing at index %d: %d then %d", i, start, end)
+			}
+		}
+		if end > uint64(len(data)) {
+			return nil, fmt.Errorf("table %d end %d exceeds data size %d", i, end, len(data))
+		}
+		if end-start < 8 {
+			return nil, fmt.Errorf("table %d is only %d bytes", i, end-start)
+		}
+
+		tableReader := bytes.NewReader(data[int(start):int(end)])
+
+		var kind uint32
+		if err := binary.Read(tableReader, bo, &kind); err != nil {
+			return nil, fmt.Errorf("failed to read table %d kind: %v", i, err)
+		}
+		if kind < uint32(types.FuncVarTableKindPerProcess) || kind > uint32(types.FuncVarTableKindX86_64) {
+			return nil, fmt.Errorf("table %d has unknown kind %d", i, kind)
+		}
+
+		var count uint32
+		if err := binary.Read(tableReader, bo, &count); err != nil {
+			return nil, fmt.Errorf("failed to read table %d count: %v", i, err)
+		}
+		if count == 0 {
+			return nil, fmt.Errorf("table %d has no default entry", i)
+		}
+		actualSize := uint64(8) + uint64(count)*8
+		tableSize := end - start
+		if actualSize != tableSize && actualSize+4 != tableSize {
+			return nil, fmt.Errorf("table %d size %d does not match %d entries (%d bytes, optionally 4 bytes padding)", i, tableSize, count, actualSize)
+		}
+
+		result.Tables[i] = types.FuncVarTable{
+			Kind:    types.FuncVarTableKind(kind),
+			Entries: make([]types.FuncVarEntry, count),
+		}
+
+		// Read entries
+		for j := uint32(0); j < count; j++ {
+			var impl uint32
+			if err := binary.Read(tableReader, bo, &impl); err != nil {
+				return nil, fmt.Errorf("failed to read table %d entry %d impl: %v", i, j, err)
+			}
+
+			var flagBits [4]uint8
+			if _, err := io.ReadFull(tableReader, flagBits[:]); err != nil {
+				return nil, fmt.Errorf("failed to read table %d entry %d flags: %v", i, j, err)
+			}
+
+			result.Tables[i].Entries[j] = types.FuncVarEntry{
+				Impl:        impl,
+				FlagBitNums: flagBits,
+			}
+		}
+		if result.Tables[i].Entries[count-1].FlagBitNums[0] != 0 {
+			return nil, fmt.Errorf("table %d last entry is not the default variant", i)
+		}
+	}
+
+	return result, nil
 }
 
 /*******************************************************************************
@@ -2279,6 +2475,87 @@ type FunctionVariants struct {
 
 type FunctionVariantFixups struct {
 	LinkEditData
+	Data *types.FuncVarFixupsData
+}
+
+func (l *FunctionVariantFixups) String() string {
+	if l.Data == nil || len(l.Data.Fixups) == 0 {
+		return fmt.Sprintf("offset=0x%09x size=0x%x", l.Offset, l.Size)
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "offset=0x%09x size=0x%x fixups=%d", l.Offset, l.Size, len(l.Data.Fixups))
+	for i, fixup := range l.Data.Fixups {
+		fmt.Fprintf(&out, "\n\t\t[%d] seg=%d off=0x%08X variant=%d",
+			i, fixup.SegIndex, fixup.SegOffset, fixup.VariantIndex)
+		if fixup.PACAuth {
+			fmt.Fprintf(&out, " pac(key=%d div=0x%04X addr=%v)",
+				fixup.PACKey, fixup.PACDiversity, fixup.PACAddress)
+		}
+	}
+	return out.String()
+}
+func (l *FunctionVariantFixups) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		LoadCmd string                   `json:"load_cmd"`
+		Len     uint32                   `json:"length"`
+		Offset  uint32                   `json:"offset"`
+		Size    uint32                   `json:"size"`
+		Data    *types.FuncVarFixupsData `json:"data,omitempty"`
+	}{
+		LoadCmd: l.Command().String(),
+		Len:     l.Len,
+		Offset:  l.Offset,
+		Size:    l.Size,
+		Data:    l.Data,
+	})
+}
+
+// ParseFunctionVariantFixups parses the LC_FUNCTION_VARIANT_FIXUPS payload data
+func ParseFunctionVariantFixups(data []byte, bo binary.ByteOrder) (*types.FuncVarFixupsData, error) {
+	if len(data) == 0 {
+		return &types.FuncVarFixupsData{}, nil
+	}
+
+	// Each fixup is 8 bytes
+	if len(data)%8 != 0 {
+		return nil, fmt.Errorf("function variant fixups data size %d is not a multiple of 8", len(data))
+	}
+
+	numFixups := len(data) / 8
+	result := &types.FuncVarFixupsData{
+		Fixups: make([]types.FuncVarFixup, numFixups),
+	}
+
+	r := bytes.NewReader(data)
+	for i := 0; i < numFixups; i++ {
+		var segOffset uint32
+		var packed uint32
+		if err := binary.Read(r, bo, &segOffset); err != nil {
+			return nil, fmt.Errorf("failed to read fixup %d segOffset: %v", i, err)
+		}
+		if err := binary.Read(r, bo, &packed); err != nil {
+			return nil, fmt.Errorf("failed to read fixup %d packed: %v", i, err)
+		}
+
+		// Unpack the bitfields:
+		// segIndex     :  4 (bits 0-3)
+		// variantIndex :  8 (bits 4-11)
+		// pacAuth      :  1 (bit 12)
+		// pacAddress   :  1 (bit 13)
+		// pacKey       :  2 (bits 14-15)
+		// pacDiversity : 16 (bits 16-31)
+		result.Fixups[i] = types.FuncVarFixup{
+			SegOffset:    segOffset,
+			SegIndex:     uint8(packed & 0xF),
+			VariantIndex: uint8((packed >> 4) & 0xFF),
+			PACAuth:      (packed>>12)&1 != 0,
+			PACAddress:   (packed>>13)&1 != 0,
+			PACKey:       uint8((packed >> 14) & 0x3),
+			PACDiversity: uint16((packed >> 16) & 0xFFFF),
+		}
+	}
+
+	return result, nil
 }
 
 /*******************************************************************************
@@ -2376,6 +2653,155 @@ type SepUnknown3 struct {
 }
 
 /*******************************************************************************
+ * LC_LAZY_LOAD_DYLIB_INFO
+ *******************************************************************************/
+
+// LazyLoadDylibInfo is a Mach-O LC_LAZY_LOAD_DYLIB_INFO load command (0x3a / 58).
+// It is a linkedit_data_command pointing at a blob in the __LINKEDIT segment.
+// Data holds the decoded payload once File.GetLazyLoadedDylibs (or Enrich) is called.
+type LazyLoadDylibInfo struct {
+	LinkEditData
+	Data *LazyLoadedDylib
+}
+
+func (l *LazyLoadDylibInfo) String() string {
+	if l.Data == nil {
+		return fmt.Sprintf("offset=0x%09x size=0x%x", l.Offset, l.Size)
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "offset=0x%09x size=0x%x %s", l.Offset, l.Size, l.Data.LoadPath)
+	if l.Data.Weak {
+		out.WriteString(" (weak)")
+	}
+	fmt.Fprintf(&out, " (%s)", l.Data.PointerFormat)
+	if len(l.Data.Fixups) > 0 {
+		for _, fx := range l.Data.Fixups {
+			fmt.Fprintf(&out, "\n\t\t%#011x", fx.Address)
+			if fx.Auth {
+				fmt.Fprintf(&out, " (auth: key=%s addrDiv=%t div=%#x)", fixupchains.KeyName(uint64(fx.Key)), fx.AddrDiv, fx.Diversity)
+			}
+			fmt.Fprintf(&out, "  %s", fx.Symbol)
+		}
+	} else {
+		for _, sym := range l.Data.Symbols {
+			fmt.Fprintf(&out, "\n\t\t%s", sym)
+		}
+	}
+	return out.String()
+}
+func (l *LazyLoadDylibInfo) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		LoadCmd string           `json:"load_cmd"`
+		Len     uint32           `json:"length"`
+		Offset  uint32           `json:"offset"`
+		Size    uint32           `json:"size"`
+		Data    *LazyLoadedDylib `json:"data,omitempty"`
+	}{
+		LoadCmd: l.Command().String(),
+		Len:     l.Len,
+		Offset:  l.Offset,
+		Size:    l.Size,
+		Data:    l.Data,
+	})
+}
+
+// LazyLoadedDylib is the decoded LC_LAZY_LOAD_DYLIB_INFO payload, mirroring
+// dyld's LazyLoadDylibLinkEdit structure.
+type LazyLoadedDylib struct {
+	LoadPath              string                `json:"load_path"`                // dylib path to lazily load
+	Weak                  bool                  `json:"weak"`                     // may be missing at runtime (flag bit 0)
+	PointerFormat         fixupchains.DCPtrKind `json:"pointer_format"`           // DYLD_CHAINED_PTR_* format of the fixup chain
+	Symbols               []string              `json:"symbols,omitempty"`        // bound symbol names
+	Fixups                []LazyLoadFixup       `json:"fixups,omitempty"`         // GOT slots bound by the fixup chain (populated by File.GetLazyLoadedDylibs)
+	FlagImageOffset       uint32                `json:"flag_image_offset"`        // image offset of the runtime "loaded" flag
+	ChainStartImageOffset uint32                `json:"chain_start_image_offset"` // image offset of the fixup chain start
+}
+
+// LazyLoadFixup is one entry of an LC_LAZY_LOAD_DYLIB_INFO fixup chain: a slot
+// that is bound to a lazily-loaded symbol when the dylib is loaded.
+type LazyLoadFixup struct {
+	Address   uint64 `json:"address"`             // VM address of the bound slot
+	Offset    uint64 `json:"offset"`              // file offset of the bound slot
+	Ordinal   uint32 `json:"ordinal"`             // index into Symbols
+	Symbol    string `json:"symbol,omitempty"`    // Symbols[Ordinal], when resolvable
+	Auth      bool   `json:"auth"`                // PAC-signed slot
+	Key       uint8  `json:"key,omitempty"`       // PAC key (0=IA 1=IB 2=DA 3=DB) when Auth
+	AddrDiv   bool   `json:"addr_div,omitempty"`  // PAC address diversity when Auth
+	Diversity uint16 `json:"diversity,omitempty"` // PAC diversity constant when Auth
+}
+
+const (
+	lazyLoadDylibHeaderSize = 24
+	lazyLoadDylibFlagWeak   = 0x0001 // flags bit 0: weak-linked ("may be missing")
+)
+
+// ParseLazyLoadDylibInfo decodes an LC_LAZY_LOAD_DYLIB_INFO __LINKEDIT payload.
+// All offsets are validated against the blob length so that malformed or
+// truncated input returns an error rather than panicking.
+func ParseLazyLoadDylibInfo(data []byte, bo binary.ByteOrder) (*LazyLoadedDylib, error) {
+	if len(data) < lazyLoadDylibHeaderSize {
+		return nil, fmt.Errorf("lazy load dylib info payload too small: %d bytes (need >= %d)", len(data), lazyLoadDylibHeaderSize)
+	}
+	if bo == nil {
+		return nil, errors.New("lazy load dylib info has no byte order")
+	}
+
+	blobLen := uint32(len(data))
+
+	// Header layout: loadPathOffset@0, flagImageOffset@4, flags@8, pointerFormat@10,
+	// chainStartImageOffset@12, symbolsCount@16, symbolStringArrayOffset@20.
+	loadPathOffset := bo.Uint32(data[0:4])
+	flagImageOffset := bo.Uint32(data[4:8])
+	flags := bo.Uint16(data[8:10])
+	pointerFormat := bo.Uint16(data[10:12])
+	chainStartImageOffset := bo.Uint32(data[12:16])
+	symbolsCount := bo.Uint32(data[16:20])
+	symbolStringArrayOffset := bo.Uint32(data[20:24])
+
+	if loadPathOffset >= blobLen {
+		return nil, fmt.Errorf("lazy load dylib info loadPathOffset 0x%x exceeds payload size 0x%x", loadPathOffset, blobLen)
+	}
+	loadPathBytes := data[loadPathOffset:]
+	loadPathEnd := bytes.IndexByte(loadPathBytes, 0)
+	if loadPathEnd < 0 {
+		return nil, errors.New("lazy load dylib info load path is not NUL terminated")
+	}
+
+	// symbol offset array must fit: symbolStringArrayOffset + 4*symbolsCount <= len
+	arrayEnd := uint64(symbolStringArrayOffset) + 4*uint64(symbolsCount)
+	if arrayEnd > uint64(blobLen) {
+		return nil, fmt.Errorf("lazy load dylib info symbol offset array end 0x%x exceeds payload size 0x%x", arrayEnd, blobLen)
+	}
+
+	lld := &LazyLoadedDylib{
+		LoadPath:              string(loadPathBytes[:loadPathEnd]),
+		Weak:                  flags&lazyLoadDylibFlagWeak != 0,
+		PointerFormat:         fixupchains.DCPtrKind(pointerFormat),
+		FlagImageOffset:       flagImageOffset,
+		ChainStartImageOffset: chainStartImageOffset,
+	}
+
+	if symbolsCount > 0 {
+		lld.Symbols = make([]string, symbolsCount)
+		for i := uint32(0); i < symbolsCount; i++ {
+			off := symbolStringArrayOffset + i*4
+			strOff := bo.Uint32(data[off : off+4])
+			if strOff >= blobLen {
+				return nil, fmt.Errorf("lazy load dylib info symbol %d string offset 0x%x exceeds payload size 0x%x", i, strOff, blobLen)
+			}
+			symbolBytes := data[strOff:]
+			symbolEnd := bytes.IndexByte(symbolBytes, 0)
+			if symbolEnd < 0 {
+				return nil, fmt.Errorf("lazy load dylib info symbol %d is not NUL terminated", i)
+			}
+			lld.Symbols[i] = string(symbolBytes[:symbolEnd])
+		}
+	}
+
+	return lld, nil
+}
+
+/*******************************************************************************
  * COMMON COMMANDS
  *******************************************************************************/
 
@@ -2383,11 +2809,30 @@ type SepUnknown3 struct {
 type Dylib struct {
 	LoadBytes
 	types.DylibCmd
-	Name string
+	Name  string
+	Flags types.DylibUseFlags // set when encoded as a dylib_use_command
+}
+
+// IsDylibUseCmd reports whether the command uses the alternate dylib_use_command
+// encoding (name offset 28 + marker in the timestamp field), mirroring dyld's
+// UnsafeHeader::loadCommandToDylibKind detection.
+func (d *Dylib) IsDylibUseCmd() bool {
+	return d.NameOffset == uint32(binary.Size(types.DylibUseCmd{})) && d.Timestamp == types.DYLIB_USE_MARKER
+}
+
+func (d *Dylib) setDylibUseFlags(b []byte, o binary.ByteOrder) {
+	if !d.IsDylibUseCmd() {
+		return
+	}
+	d.Flags = types.DylibUseFlags(o.Uint32(b[binary.Size(types.DylibCmd{}):]))
 }
 
 func (d *Dylib) LoadSize() uint32 {
-	return pointerAlign(uint32(binary.Size(d.DylibCmd)) + uint32(len(d.Name)) + 1)
+	headerSize := uint32(binary.Size(d.DylibCmd))
+	if d.IsDylibUseCmd() {
+		headerSize = uint32(binary.Size(types.DylibUseCmd{}))
+	}
+	return pointerAlign(headerSize + uint32(len(d.Name)) + 1)
 }
 func (d *Dylib) Put(b []byte, o binary.ByteOrder) int {
 	o.PutUint32(b[0*4:], uint32(d.LoadCmd))
@@ -2396,17 +2841,30 @@ func (d *Dylib) Put(b []byte, o binary.ByteOrder) int {
 	o.PutUint32(b[3*4:], d.Timestamp)
 	o.PutUint32(b[4*4:], uint32(d.CurrentVersion))
 	o.PutUint32(b[5*4:], uint32(d.CompatVersion))
+	if d.IsDylibUseCmd() {
+		o.PutUint32(b[6*4:], uint32(d.Flags))
+		return 7 * binary.Size(uint32(0))
+	}
 	return 6 * binary.Size(uint32(0))
 }
 func (d *Dylib) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
+	start := buf.Len()
 	if err := binary.Write(buf, o, d.DylibCmd); err != nil {
 		return fmt.Errorf("failed to write %s to buffer: %v", d.Command(), err)
+	}
+	if d.IsDylibUseCmd() {
+		if err := binary.Write(buf, o, d.Flags); err != nil {
+			return fmt.Errorf("failed to write %s flags to buffer: %v", d.Command(), err)
+		}
 	}
 	if _, err := buf.WriteString(d.Name + "\x00"); err != nil {
 		return fmt.Errorf("failed to write %s to %s buffer: %v", d.Name, d.Command(), err)
 	}
-	if (buf.Len() % 8) != 0 {
-		pad := 8 - (buf.Len() % 8)
+	written := buf.Len() - start
+	if int(d.Len) < written {
+		return fmt.Errorf("%s cmdsize %d is smaller than the %d bytes written; Len must be recalculated (e.g. via LoadSize) after changing Name", d.Command(), d.Len, written)
+	}
+	if pad := int(d.Len) - written; pad > 0 {
 		if _, err := buf.Write(make([]byte, pad)); err != nil {
 			return fmt.Errorf("failed to write %s padding: %v", d.Command(), err)
 		}
@@ -2414,16 +2872,20 @@ func (d *Dylib) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
 	return nil
 }
 func (d *Dylib) String() string {
+	if flags := d.Flags.List(); len(flags) > 0 {
+		return fmt.Sprintf("%s (%s) [%s]", d.Name, d.CurrentVersion, strings.Join(flags, " "))
+	}
 	return fmt.Sprintf("%s (%s)", d.Name, d.CurrentVersion)
 }
 func (d *Dylib) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		LoadCmd   string `json:"load_cmd"`
-		Len       uint32 `json:"length"`
-		Name      string `json:"name"`
-		Timestamp uint32 `json:"timestamp"`
-		Current   string `json:"current_version"`
-		Compat    string `json:"compatibility_version"`
+		LoadCmd   string   `json:"load_cmd"`
+		Len       uint32   `json:"length"`
+		Name      string   `json:"name"`
+		Timestamp uint32   `json:"timestamp"`
+		Current   string   `json:"current_version"`
+		Compat    string   `json:"compatibility_version"`
+		Flags     []string `json:"flags,omitempty"`
 	}{
 		LoadCmd:   d.Command().String(),
 		Len:       d.Len,
@@ -2431,6 +2893,7 @@ func (d *Dylib) MarshalJSON() ([]byte, error) {
 		Timestamp: d.Timestamp,
 		Current:   d.CurrentVersion.String(),
 		Compat:    d.CompatVersion.String(),
+		Flags:     d.Flags.List(),
 	})
 }
 
@@ -2530,7 +2993,7 @@ func (l *LinkEditData) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
 	return nil
 }
 func (l *LinkEditData) String() string {
-	return fmt.Sprintf("offset=0x%09x  size=%#x", l.Offset, l.Size)
+	return fmt.Sprintf("offset=0x%09x size=%#x", l.Offset, l.Size)
 }
 func (l *LinkEditData) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {

@@ -10,6 +10,7 @@ const (
 	REBASE_TYPE_POINTER                              = 1
 	REBASE_TYPE_TEXT_ABSOLUTE32                      = 2
 	REBASE_TYPE_TEXT_PCREL32                         = 3
+	REBASE_TYPE_THREADED_POINTER_ARM64E              = 4
 	REBASE_OPCODE_MASK                               = 0xF0
 	REBASE_IMMEDIATE_MASK                            = 0x0F
 	REBASE_OPCODE_DONE                               = 0x00
@@ -23,6 +24,17 @@ const (
 	REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB = 0x80
 )
 
+// Arm64eFixupMetadata preserves pointer-authentication fields from an original
+// ARM64e threaded bind/rebase word. Loaders that cannot emulate PAC may use the
+// decoded target/addend while still exposing the original metadata to callers.
+type Arm64eFixupMetadata struct {
+	Raw              uint64
+	Authenticated    bool
+	Diversity        uint16
+	AddressDiversity bool
+	Key              uint8
+}
+
 type Rebase struct {
 	Type         uint8
 	SegmentIndex uint32 // 段索引 (用于 iunios 运行时)
@@ -31,6 +43,7 @@ type Rebase struct {
 	Start        uint64
 	Offset       uint64
 	Value        uint64
+	Arm64e       *Arm64eFixupMetadata
 }
 
 // VMAddr 返回虚拟地址 (Start + Offset)
@@ -127,6 +140,7 @@ type Bind struct {
 	Start        uint64
 	Dylib        string
 	Value        uint64
+	Arm64e       *Arm64eFixupMetadata
 }
 
 // VMAddr 返回虚拟地址 (Start + SegOffset)
@@ -167,6 +181,8 @@ func getBindType(t uint8) string {
 		return "BIND_TYPE_THREADED_BIND"
 	case BIND_TYPE_THREADED_REBASE:
 		return "BIND_TYPE_THREADED_REBASE"
+	case REBASE_TYPE_THREADED_POINTER_ARM64E:
+		return "arm64e threaded rebase"
 	}
 	return fmt.Sprintf(" bad bind type %#02x", t)
 }
@@ -267,37 +283,41 @@ func (f ExportFlag) Absolute() bool {
 	return (f & EXPORT_SYMBOL_FLAGS_KIND_MASK) == EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
 }
 func (f ExportFlag) WeakDefinition() bool {
-	return f == EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
+	return (f & EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION) != 0
 }
 func (f ExportFlag) ReExport() bool {
-	return f == EXPORT_SYMBOL_FLAGS_REEXPORT
+	return (f & EXPORT_SYMBOL_FLAGS_REEXPORT) != 0
 }
 func (f ExportFlag) StubAndResolver() bool {
-	return f == EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER
+	return (f & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER) != 0
 }
 func (f ExportFlag) StaticResolver() bool {
-	return f == EXPORT_SYMBOL_FLAGS_STATIC_RESOLVER
+	return (f & EXPORT_SYMBOL_FLAGS_STATIC_RESOLVER) != 0
 }
 
 func (f ExportFlag) String() string {
-	var fStr string
-	if f.Regular() {
-		fStr += "regular"
-		if f.StubAndResolver() {
-			fStr += "|has_resolver"
-		} else if f.StaticResolver() {
-			fStr += "|static_resolver"
-		} else if f.WeakDefinition() {
-			fStr += "|weak_def"
-		}
-	} else if f.ThreadLocal() {
-		fStr += "per-thread"
-	} else if f.Absolute() {
-		fStr += "absolute"
-	} else if f.ReExport() {
-		fStr += "[re-export]"
+	var values []string
+	switch {
+	case f.ThreadLocal():
+		values = append(values, "per-thread")
+	case f.Absolute():
+		values = append(values, "absolute")
+	default:
+		values = append(values, "regular")
 	}
-	return strings.TrimSpace(fStr)
+	if f.ReExport() {
+		values = append(values, "re-export")
+	}
+	if f.StubAndResolver() {
+		values = append(values, "has_resolver")
+	}
+	if f.StaticResolver() {
+		values = append(values, "static_resolver")
+	}
+	if f.WeakDefinition() {
+		values = append(values, "weak_def")
+	}
+	return strings.Join(values, "|")
 }
 
 // Export 导出符号信息 (用于 iunios 运行时)

@@ -1,6 +1,7 @@
 package types
 
 //go:generate stringer -type=LoadCmd,X86ThreadFlavor,ArmThreadFlavor -output commands_string.go
+//go:generate stringer -type=ARM64Flag,X86_64Flag,PerProcessFlag,SystemWideFlag -linecomment -output funcvariant_string.go
 
 import (
 	"encoding/json"
@@ -84,6 +85,7 @@ const (
 	LC_FUNCTION_VARIANTS        LoadCmd = 0x37                 /* used with linkedit_data_command */
 	LC_FUNCTION_VARIANT_FIXUPS  LoadCmd = 0x38                 /* used with linkedit_data_command */
 	LC_TARGET_TRIPLE            LoadCmd = 0x39                 /* target triple used to compile */
+	LC_LAZY_LOAD_DYLIB_INFO     LoadCmd = 0x3a                 /* used with linkedit_data_command */
 	/*
 	 * sep load commands
 	 */
@@ -134,11 +136,11 @@ func (s SegFlag) List() []string {
 }
 
 func (s SegFlag) String() string {
-	var fStr string
+	var fStr strings.Builder
 	for _, attr := range s.List() {
-		fStr += fmt.Sprintf("%s|", attr)
+		fStr.WriteString(fmt.Sprintf("%s|", attr))
 	}
-	return strings.TrimSuffix(fStr, "|")
+	return strings.TrimSuffix(fStr.String(), "|")
 }
 
 /*
@@ -273,10 +275,31 @@ const (
 	DYLIB_USE_DELAYED_INIT DylibUseFlags = 0x08
 )
 
+func (f DylibUseFlags) List() []string {
+	var flags []string
+	if (f & DYLIB_USE_WEAK_LINK) != 0 {
+		flags = append(flags, "weak-link")
+	}
+	if (f & DYLIB_USE_REEXPORT) != 0 {
+		flags = append(flags, "re-export")
+	}
+	if (f & DYLIB_USE_UPWARD) != 0 {
+		flags = append(flags, "upward")
+	}
+	if (f & DYLIB_USE_DELAYED_INIT) != 0 {
+		flags = append(flags, "delay-init")
+	}
+	return flags
+}
+
+func (f DylibUseFlags) String() string {
+	return strings.Join(f.List(), "|")
+}
+
 const DYLIB_USE_MARKER = 0x1a741800
 
 /*
- * DylibUseCmd is an alternate encoding for: LC_LOAD_DYLIB.
+ * DylibUseCmd is an alternate encoding for dylib load commands.
  * The flags field contains independent flags DYLIB_USE_*
  * First supported in macOS 15, iOS 18.
  */
@@ -914,8 +937,9 @@ type LinkEditDataCmd struct {
 	   LC_DYLIB_CODE_SIGN_DRS,
 	   LC_ATOM_INFO,
 	   LC_LINKER_OPTIMIZATION_HINT,
-	   LC_DYLD_EXPORTS_TRIE, or
-	   LC_DYLD_CHAINED_FIXUPS. */
+	   LC_DYLD_EXPORTS_TRIE,
+	   LC_DYLD_CHAINED_FIXUPS, or
+	   LC_LAZY_LOAD_DYLIB_INFO. */
 	Len    uint32 // sizeof(struct linkedit_data_command)
 	Offset uint32 // file offset of data in __LINKEDIT segment
 	Size   uint32 // file size of data in __LINKEDIT segment
@@ -941,6 +965,215 @@ type DyldChainedFixupsCmd LinkEditDataCmd // LC_DYLD_CHAINED_FIXUPS
 type FunctionVariantsCmd LinkEditDataCmd // LC_FUNCTION_VARIANTS
 // A FunctionVariantFixupsCmd is used with linkedit_data_command command.
 type FunctionVariantFixupsCmd LinkEditDataCmd // LC_FUNCTION_VARIANT_FIXUPS
+// A LazyLoadDylibInfoCmd is used with linkedit_data_command command.
+type LazyLoadDylibInfoCmd LinkEditDataCmd // LC_LAZY_LOAD_DYLIB_INFO
+
+/*
+ * FunctionVariants payload structures
+ * These describe runtime function variant selection based on CPU features
+ */
+
+// FuncVarTableKind represents the kind of function variant table
+type FuncVarTableKind uint32
+
+const (
+	FuncVarTableKindPerProcess FuncVarTableKind = 1 // Per-process variant selection
+	FuncVarTableKindSystemWide FuncVarTableKind = 2 // System-wide variant selection
+	FuncVarTableKindARM64      FuncVarTableKind = 3 // ARM64-specific variants
+	FuncVarTableKindX86_64     FuncVarTableKind = 4 // x86_64-specific variants
+)
+
+func (k FuncVarTableKind) String() string {
+	switch k {
+	case FuncVarTableKindPerProcess:
+		return "PER_PROCESS"
+	case FuncVarTableKindSystemWide:
+		return "SYSTEM_WIDE"
+	case FuncVarTableKindARM64:
+		return "ARM64"
+	case FuncVarTableKindX86_64:
+		return "X86_64"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", k)
+	}
+}
+
+// ARM64 CPU feature flags
+type ARM64Flag uint8
+
+const (
+	ARM64FlagDefault     ARM64Flag = 0  // default
+	ARM64FlagFLAGM       ARM64Flag = 1  // flagm
+	ARM64FlagFLAGM2      ARM64Flag = 2  // flagm2
+	ARM64FlagFHM         ARM64Flag = 3  // fhm
+	ARM64FlagDOTPROD     ARM64Flag = 4  // dotprod
+	ARM64FlagSHA3        ARM64Flag = 5  // sha3
+	ARM64FlagRDM         ARM64Flag = 6  // rdm
+	ARM64FlagLSE         ARM64Flag = 7  // lse
+	ARM64FlagSHA256      ARM64Flag = 8  // sha256
+	ARM64FlagSHA512      ARM64Flag = 9  // sha512
+	ARM64FlagSHA1        ARM64Flag = 10 // sha1
+	ARM64FlagAES         ARM64Flag = 11 // aes
+	ARM64FlagPMULL       ARM64Flag = 12 // pmull
+	ARM64FlagSPECRES     ARM64Flag = 13 // specres
+	ARM64FlagSB          ARM64Flag = 14 // sb
+	ARM64FlagFRINTTS     ARM64Flag = 15 // frintts
+	ARM64FlagLRCPC       ARM64Flag = 16 // lrcpc
+	ARM64FlagLRCPC2      ARM64Flag = 17 // lrcpc2
+	ARM64FlagFCMA        ARM64Flag = 18 // fcma
+	ARM64FlagJSCVT       ARM64Flag = 19 // jscvt
+	ARM64FlagPAUTH       ARM64Flag = 20 // PAuth
+	ARM64FlagPAUTH2      ARM64Flag = 21 // PAuth2
+	ARM64FlagFPAC        ARM64Flag = 22 // fpac
+	ARM64FlagDPB         ARM64Flag = 23 // dpb
+	ARM64FlagDPB2        ARM64Flag = 24 // dpb2
+	ARM64FlagBF16        ARM64Flag = 25 // bf16
+	ARM64FlagI8MM        ARM64Flag = 26 // i8mm
+	ARM64FlagWFXT        ARM64Flag = 27 // WFxT
+	ARM64FlagRPRES       ARM64Flag = 28 // rpres
+	ARM64FlagECV         ARM64Flag = 29 // ecv
+	ARM64FlagAFP         ARM64Flag = 30 // afp
+	ARM64FlagLSE2        ARM64Flag = 31 // lse2
+	ARM64FlagCSV2        ARM64Flag = 32 // csv2
+	ARM64FlagCVS3        ARM64Flag = 33 // csv3
+	ARM64FlagDIT         ARM64Flag = 34 // dit
+	ARM64FlagFP16        ARM64Flag = 35 // fp16
+	ARM64FlagSSBS        ARM64Flag = 36 // ssbs
+	ARM64FlagBTI         ARM64Flag = 37 // bti
+	ARM64FlagSME         ARM64Flag = 44 // sme
+	ARM64FlagSME2        ARM64Flag = 45 // sme2
+	ARM64FlagSMEF64F64   ARM64Flag = 46 // smef64f64
+	ARM64FlagSMEI16I64   ARM64Flag = 47 // smei16i64
+	ARM64FlagSMEF32F32   ARM64Flag = 48 // smef32f32
+	ARM64FlagSMEBI32I32  ARM64Flag = 49 // smebi32i32
+	ARM64FlagSMEB16F32   ARM64Flag = 50 // smeb16f32
+	ARM64FlagSMEF16F32   ARM64Flag = 51 // smef16f32
+	ARM64FlagSMEI8I32    ARM64Flag = 52 // smei8i32
+	ARM64FlagSMEI16I32   ARM64Flag = 53 // smei16i32
+	ARM64FlagADVSIMD     ARM64Flag = 54 // AdvSIMD
+	ARM64FlagADVSIMDHPFP ARM64Flag = 55 // AdvSIMDHpfp
+	ARM64FlagCRC32       ARM64Flag = 56 // crc32
+)
+
+// X86_64 CPU feature flags
+type X86_64Flag uint8
+
+const (
+	X86_64FlagDefault   X86_64Flag = 0  // default
+	X86_64FlagSSE41     X86_64Flag = 1  // sse41
+	X86_64FlagFMA       X86_64Flag = 2  // fma
+	X86_64FlagAVX       X86_64Flag = 3  // avx
+	X86_64FlagAVX2      X86_64Flag = 4  // avx2
+	X86_64FlagAVX512F   X86_64Flag = 5  // avx512f
+	X86_64FlagAVX512BW  X86_64Flag = 6  // avx512bw
+	X86_64FlagBMI1      X86_64Flag = 7  // bmi1
+	X86_64FlagROSETTA   X86_64Flag = 8  // rosetta
+	X86_64FlagHASWELL   X86_64Flag = 9  // haswell
+	X86_64FlagIVYBRIDGE X86_64Flag = 10 // ivybridge
+	X86_64FlagNEHALEM   X86_64Flag = 11 // nehalem
+)
+
+// PerProcess flags
+type PerProcessFlag uint8
+
+const (
+	PerProcessFlagDefault    PerProcessFlag = 0 // default
+	PerProcessFlagTranslated PerProcessFlag = 1 // translated
+	PerProcessFlagNoOverread PerProcessFlag = 3 // no_overread
+)
+
+// SystemWide flags
+type SystemWideFlag uint8
+
+const (
+	SystemWideFlagDefault         SystemWideFlag = 0 // default
+	SystemWideFlagInternalInstall SystemWideFlag = 1 // internalInstall
+	SystemWideFlagCustomerInstall SystemWideFlag = 2 // customerInstall
+	SystemWideFlagLockdown        SystemWideFlag = 3 // lockdown
+)
+
+// FuncVarFlagName returns the human-readable name for a flag bit number
+func FuncVarFlagName(kind FuncVarTableKind, flagBit uint8) string {
+	switch kind {
+	case FuncVarTableKindARM64:
+		return funcVarFlagString("ARM64Flag", flagBit, ARM64Flag(flagBit).String())
+	case FuncVarTableKindX86_64:
+		return funcVarFlagString("X86_64Flag", flagBit, X86_64Flag(flagBit).String())
+	case FuncVarTableKindPerProcess:
+		return funcVarFlagString("PerProcessFlag", flagBit, PerProcessFlag(flagBit).String())
+	case FuncVarTableKindSystemWide:
+		return funcVarFlagString("SystemWideFlag", flagBit, SystemWideFlag(flagBit).String())
+	default:
+		return fmt.Sprintf("flag_%d", flagBit)
+	}
+}
+
+func funcVarFlagString(typeName string, flagBit uint8, val string) string {
+	if strings.HasPrefix(val, typeName+"(") {
+		return fmt.Sprintf("flag_%d", flagBit)
+	}
+	return val
+}
+
+// FuncVarEntry represents a single function variant entry
+type FuncVarEntry struct {
+	// Impl is either a relative address to the implementation or a table index
+	// The lower 31 bits contain the value, bit 31 indicates if it's a table index
+	Impl uint32
+	// FlagBitNums are 4 bytes representing CPU feature flag bit numbers
+	FlagBitNums [4]uint8
+	// Symbol is the name of the function (populated during parsing if available)
+	Symbol string `json:"symbol,omitempty"`
+}
+
+// IsTableIndex returns true if Impl points to another table rather than an address
+func (e FuncVarEntry) IsTableIndex() bool {
+	return (e.Impl & 0x80000000) != 0
+}
+
+// ImplValue returns the implementation address or table index (lower 31 bits)
+func (e FuncVarEntry) ImplValue() uint32 {
+	return e.Impl & 0x7FFFFFFF
+}
+
+// GetFlags returns non-zero flag bit numbers as a slice
+func (e FuncVarEntry) GetFlags() []uint8 {
+	var flags []uint8
+	for _, f := range e.FlagBitNums {
+		if f != 0 {
+			flags = append(flags, f)
+		}
+	}
+	return flags
+}
+
+// FuncVarTable represents a runtime table of function variants
+type FuncVarTable struct {
+	Kind    FuncVarTableKind
+	Entries []FuncVarEntry
+}
+
+// FuncVarData represents the parsed LC_FUNCTION_VARIANTS payload
+type FuncVarData struct {
+	Tables []FuncVarTable
+}
+
+// FuncVarFixup represents an internal fixup for function variants
+// Used by LC_FUNCTION_VARIANT_FIXUPS to patch GOT slots at load time
+type FuncVarFixup struct {
+	SegOffset    uint32 // offset within segment to the GOT slot
+	SegIndex     uint8  // segment index (4 bits)
+	VariantIndex uint8  // index into FunctionVariants table (8 bits)
+	PACAuth      bool   // PAC signed or not (1 bit)
+	PACAddress   bool   // (1 bit)
+	PACKey       uint8  // (2 bits)
+	PACDiversity uint16 // (16 bits)
+}
+
+// FuncVarFixupsData represents the parsed LC_FUNCTION_VARIANT_FIXUPS payload
+type FuncVarFixupsData struct {
+	Fixups []FuncVarFixup
+}
 
 type EncryptionSystem uint32
 
