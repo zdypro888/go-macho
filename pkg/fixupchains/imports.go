@@ -35,7 +35,11 @@ func (i DcfImport) String() string {
 type DyldChainedImport uint32
 
 func (d DyldChainedImport) LibOrdinal() int {
-	return int(int8(types.ExtractBits(uint64(d), 0, 8)))
+	value := uint8(types.ExtractBits(uint64(d), 0, 8))
+	if value > 0xf0 {
+		return int(int8(value))
+	}
+	return int(value)
 }
 func (d DyldChainedImport) WeakImport() bool {
 	return types.ExtractBits(uint64(d), 8, 1) == 1
@@ -76,7 +80,11 @@ func (i DyldChainedImportAddend) String() string {
 type DyldChainedImport64 uint64
 
 func (d DyldChainedImport64) LibOrdinal() int {
-	return int(int16(types.ExtractBits(uint64(d), 0, 16)))
+	value := uint16(types.ExtractBits(uint64(d), 0, 16))
+	if value > 0xfff0 {
+		return int(int16(value))
+	}
+	return int(value)
 }
 func (d DyldChainedImport64) WeakImport() bool {
 	return types.ExtractBits(uint64(d), 16, 1) == 1

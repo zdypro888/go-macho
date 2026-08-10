@@ -34,7 +34,7 @@ func BenchmarkGetFixupAtOffset(b *testing.B) {
 			},
 		},
 		Imports:        make([]DcfImport, 10),
-		fixups:         make(map[uint64]Fixup),
+		fixups:         make(map[uint64][]Fixup),
 		metadataParsed: true,
 		importsParsed:  true,
 		chainsParsed:   false,

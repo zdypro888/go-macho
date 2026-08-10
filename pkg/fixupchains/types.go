@@ -4,23 +4,34 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/zdypro888/go-macho/types"
 )
 
 type DyldChainedFixups struct {
+	parseMu sync.Mutex
 	DyldChainedFixupsHeader
-	PointerFormat  DCPtrKind
-	Starts         []DyldChainedStarts
-	Imports        []DcfImport
-	fixups         map[uint64]Fixup // keyed by target file offset
-	r              *bytes.Reader
-	sr             types.MachoReader
-	bo             binary.ByteOrder
-	metadataParsed bool
-	importsParsed  bool
-	chainsParsed   bool
-	segmentIndex   []segmentRange
+	PointerFormat      DCPtrKind
+	Starts             []DyldChainedStarts
+	Imports            []DcfImport
+	fixups             map[uint64][]Fixup // keyed by each format's encoded Target(); targets are not unique
+	r                  *bytes.Reader
+	sr                 types.MachoReader
+	bo                 binary.ByteOrder
+	metadataParsed     bool
+	importsParsed      bool
+	chainsParsed       bool
+	segmentIndex       []segmentRange
+	kernelCacheBases   [4]uint64
+	kernelCacheBaseSet [4]bool
+	// kernelCacheLevelZeroSegment is layout context, not a basePointers entry:
+	// ResolveRebaseVMAddress adds its current-image slide. An explicit runtime
+	// basePointers[0] configured above takes precedence.
+	kernelCacheLevelZeroSegment    uint64
+	kernelCacheLevelZeroSegmentSet bool
+	sharedCacheBase                uint64
+	sharedCacheBaseSet             bool
 }
 
 type Fixup interface {
@@ -83,28 +94,74 @@ type DyldChainedStartsInImage struct {
 type DCPtrKind uint16
 
 const (
-	DYLD_CHAINED_PTR_ARM64E              DCPtrKind = 1 // stride 8, unauth target is vmaddr
-	DYLD_CHAINED_PTR_64                  DCPtrKind = 2 // target is vmaddr
-	DYLD_CHAINED_PTR_32                  DCPtrKind = 3
-	DYLD_CHAINED_PTR_32_CACHE            DCPtrKind = 4
-	DYLD_CHAINED_PTR_32_FIRMWARE         DCPtrKind = 5
-	DYLD_CHAINED_PTR_64_OFFSET           DCPtrKind = 6 // target is vm offset
-	DYLD_CHAINED_PTR_ARM64E_OFFSET       DCPtrKind = 7 // old name
-	DYLD_CHAINED_PTR_ARM64E_KERNEL       DCPtrKind = 7 // stride 4, unauth target is vm offset
-	DYLD_CHAINED_PTR_64_KERNEL_CACHE     DCPtrKind = 8
-	DYLD_CHAINED_PTR_ARM64E_USERLAND     DCPtrKind = 9  // stride 8, unauth target is vm offset
-	DYLD_CHAINED_PTR_ARM64E_FIRMWARE     DCPtrKind = 10 // stride 4, unauth target is vmaddr
-	DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE DCPtrKind = 11 // stride 1, x86_64 kernel caches
-	DYLD_CHAINED_PTR_ARM64E_USERLAND24   DCPtrKind = 12 // stride 8, unauth target is vm offset, 24-bit bind
-	DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE DCPtrKind = 13 // stride 8, regular/auth targets both vm offsets.  Only A keys supported
-	DYLD_CHAINED_PTR_ARM64E_SEGMENTED    DCPtrKind = 14 // stride 4, rebase offsets use segIndex and segOffset
+	DYLD_CHAINED_PTR_ARM64E                 DCPtrKind = 1 // stride 8, unauth target is vmaddr
+	DYLD_CHAINED_PTR_64                     DCPtrKind = 2 // target is vmaddr
+	DYLD_CHAINED_PTR_32                     DCPtrKind = 3
+	DYLD_CHAINED_PTR_32_CACHE               DCPtrKind = 4
+	DYLD_CHAINED_PTR_32_FIRMWARE            DCPtrKind = 5
+	DYLD_CHAINED_PTR_64_OFFSET              DCPtrKind = 6 // target is vm offset
+	DYLD_CHAINED_PTR_ARM64E_OFFSET          DCPtrKind = 7 // old name
+	DYLD_CHAINED_PTR_ARM64E_KERNEL          DCPtrKind = 7 // stride 4, unauth target is vm offset
+	DYLD_CHAINED_PTR_64_KERNEL_CACHE        DCPtrKind = 8
+	DYLD_CHAINED_PTR_ARM64E_USERLAND        DCPtrKind = 9  // stride 8, unauth target is vm offset
+	DYLD_CHAINED_PTR_ARM64E_FIRMWARE        DCPtrKind = 10 // stride 4, unauth target is vmaddr
+	DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE    DCPtrKind = 11 // stride 1, x86_64 kernel caches
+	DYLD_CHAINED_PTR_ARM64E_USERLAND24      DCPtrKind = 12 // stride 8, unauth target is vm offset, 24-bit bind
+	DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE    DCPtrKind = 13 // stride 8, regular/auth targets both vm offsets.  Only A keys supported
+	DYLD_CHAINED_PTR_ARM64E_SEGMENTED       DCPtrKind = 14 // stride 4, rebase offsets use segIndex and segOffset
+	DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3 DCPtrKind = 15 // 8-byte stride, shared-cache slide-info v3 encoding
+	DYLD_CHAINED_PTR_SHARED_CACHE_V2        DCPtrKind = 16 // 8-byte pointer, 4-byte next stride, shared-cache slide-info v2 encoding
 )
+
+func (k DCPtrKind) String() string {
+	switch k {
+	case DYLD_CHAINED_PTR_ARM64E:
+		return "DYLD_CHAINED_PTR_ARM64E"
+	case DYLD_CHAINED_PTR_64:
+		return "DYLD_CHAINED_PTR_64"
+	case DYLD_CHAINED_PTR_32:
+		return "DYLD_CHAINED_PTR_32"
+	case DYLD_CHAINED_PTR_32_CACHE:
+		return "DYLD_CHAINED_PTR_32_CACHE"
+	case DYLD_CHAINED_PTR_32_FIRMWARE:
+		return "DYLD_CHAINED_PTR_32_FIRMWARE"
+	case DYLD_CHAINED_PTR_64_OFFSET:
+		return "DYLD_CHAINED_PTR_64_OFFSET"
+	case DYLD_CHAINED_PTR_ARM64E_KERNEL:
+		return "DYLD_CHAINED_PTR_ARM64E_KERNEL"
+	case DYLD_CHAINED_PTR_64_KERNEL_CACHE:
+		return "DYLD_CHAINED_PTR_64_KERNEL_CACHE"
+	case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+		return "DYLD_CHAINED_PTR_ARM64E_USERLAND"
+	case DYLD_CHAINED_PTR_ARM64E_FIRMWARE:
+		return "DYLD_CHAINED_PTR_ARM64E_FIRMWARE"
+	case DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE:
+		return "DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE"
+	case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
+		return "DYLD_CHAINED_PTR_ARM64E_USERLAND24"
+	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+		return "DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE"
+	case DYLD_CHAINED_PTR_ARM64E_SEGMENTED:
+		return "DYLD_CHAINED_PTR_ARM64E_SEGMENTED"
+	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3:
+		return "DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3"
+	case DYLD_CHAINED_PTR_SHARED_CACHE_V2:
+		return "DYLD_CHAINED_PTR_SHARED_CACHE_V2"
+	default:
+		return fmt.Sprintf("DYLD_CHAINED_PTR(%d)", uint16(k))
+	}
+}
 
 type DyldChainedStarts struct {
 	DyldChainedStartsInSegment
-	PageStarts  []DCPtrStart
-	ChainStarts []uint16
-	Fixups      []Fixup
+	// SegmentVMOffset preserves the on-disk segment_offset.  Static-analysis
+	// callers may translate SegmentOffset to a file offset after parsing, but
+	// format 14 still needs the original runtime-offset table to resolve its
+	// targetSegIndex/targetSegOffset pair.
+	SegmentVMOffset uint64
+	PageStarts      []DCPtrStart
+	ChainStarts     []uint16
+	Fixups          []Fixup
 }
 
 type segmentRange struct {
@@ -135,34 +192,30 @@ func (s *DyldChainedStarts) Binds() []Bind {
 	return binds
 }
 
-func stride(pointerFormat DCPtrKind) uint64 {
+func stride(pointerFormat DCPtrKind) (uint64, bool) {
 	switch pointerFormat {
-	case DYLD_CHAINED_PTR_ARM64E:
-		fallthrough
-	case DYLD_CHAINED_PTR_ARM64E_USERLAND:
-		fallthrough
-	case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
-		return uint64(8)
-	case DYLD_CHAINED_PTR_ARM64E_KERNEL:
-		fallthrough
-	case DYLD_CHAINED_PTR_ARM64E_FIRMWARE:
-		fallthrough
-	case DYLD_CHAINED_PTR_32_FIRMWARE:
-		fallthrough
-	case DYLD_CHAINED_PTR_64:
-		fallthrough
-	case DYLD_CHAINED_PTR_64_OFFSET:
-		fallthrough
-	case DYLD_CHAINED_PTR_32:
-		fallthrough
-	case DYLD_CHAINED_PTR_32_CACHE:
-		fallthrough
-	case DYLD_CHAINED_PTR_64_KERNEL_CACHE:
-		return uint64(4)
+	case DYLD_CHAINED_PTR_ARM64E,
+		DYLD_CHAINED_PTR_ARM64E_USERLAND,
+		DYLD_CHAINED_PTR_ARM64E_USERLAND24,
+		DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE,
+		DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3:
+		return 8, true
+	case DYLD_CHAINED_PTR_ARM64E_KERNEL,
+		DYLD_CHAINED_PTR_ARM64E_FIRMWARE,
+		DYLD_CHAINED_PTR_32_FIRMWARE,
+		DYLD_CHAINED_PTR_64,
+		DYLD_CHAINED_PTR_64_OFFSET,
+		DYLD_CHAINED_PTR_32,
+		DYLD_CHAINED_PTR_32_CACHE,
+		DYLD_CHAINED_PTR_64_KERNEL_CACHE,
+		DYLD_CHAINED_PTR_ARM64E_SEGMENTED:
+		return 4, true
 	case DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE:
-		return uint64(1)
+		return 1, true
+	case DYLD_CHAINED_PTR_SHARED_CACHE_V2:
+		return 4, true
 	default:
-		panic(fmt.Sprintf("unsupported pointer chain format: %d", pointerFormat))
+		return 0, false
 	}
 }
 
@@ -170,14 +223,34 @@ func pointerSize(pointerFormat DCPtrKind) int {
 	switch pointerFormat {
 	case DYLD_CHAINED_PTR_32, DYLD_CHAINED_PTR_32_CACHE, DYLD_CHAINED_PTR_32_FIRMWARE:
 		return 4
-	default:
+	case DYLD_CHAINED_PTR_ARM64E,
+		DYLD_CHAINED_PTR_64,
+		DYLD_CHAINED_PTR_64_OFFSET,
+		DYLD_CHAINED_PTR_ARM64E_KERNEL,
+		DYLD_CHAINED_PTR_64_KERNEL_CACHE,
+		DYLD_CHAINED_PTR_ARM64E_USERLAND,
+		DYLD_CHAINED_PTR_ARM64E_FIRMWARE,
+		DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE,
+		DYLD_CHAINED_PTR_ARM64E_USERLAND24,
+		DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE,
+		DYLD_CHAINED_PTR_ARM64E_SEGMENTED,
+		DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3,
+		DYLD_CHAINED_PTR_SHARED_CACHE_V2:
 		return 8
+	default:
+		return 0
 	}
 }
 
 // PointerSize returns the size in bytes for pointers using the given chained pointer format.
 func PointerSize(pointerFormat DCPtrKind) int {
 	return pointerSize(pointerFormat)
+}
+
+// Stride returns the chain step (in bytes) that the pointer format's "next"
+// field is multiplied by. Unknown formats are reported instead of panicking.
+func Stride(pointerFormat DCPtrKind) (uint64, bool) {
+	return stride(pointerFormat)
 }
 
 // DyldChainedStartsInSegment object is embedded in dyld_chain_starts_in_image
@@ -297,9 +370,10 @@ func (d DyldChainedPtrArm64eRebase) String(baseAddr ...uint64) string {
 
 // DYLD_CHAINED_PTR_ARM64E
 type DyldChainedPtrArm64eBind struct {
-	Fixup   uint64
-	Pointer uint64
-	Import  string
+	Fixup        uint64
+	Pointer      uint64
+	Import       string
+	ImportAddend int64
 }
 
 func (d DyldChainedPtrArm64eBind) IsRebase() bool {
@@ -318,14 +392,17 @@ func (d DyldChainedPtrArm64eBind) Zero() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 16, 16)
 }
 func (d DyldChainedPtrArm64eBind) Addend() uint64 {
+	return uint64(d.SignExtendedAddend())
+}
+func (d DyldChainedPtrArm64eBind) InlineAddend() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 32, 19) // +/-256K
 }
 func (d DyldChainedPtrArm64eBind) SignExtendedAddend() int64 {
-	addend := d.Addend()
+	addend := d.InlineAddend()
 	if (addend & 0x40000) != 0 {
-		return int64(addend | 0xFFFFFFFFFFFC0000)
+		return int64(addend|0xFFFFFFFFFFFC0000) + d.ImportAddend
 	}
-	return int64(addend)
+	return int64(addend) + d.ImportAddend
 }
 func (d DyldChainedPtrArm64eBind) Next() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 51, 11) // 4 or 8-byte stide
@@ -420,9 +497,10 @@ func (d DyldChainedPtrArm64eAuthRebase) String(baseAddr ...uint64) string {
 
 // DYLD_CHAINED_PTR_ARM64E
 type DyldChainedPtrArm64eAuthBind struct {
-	Fixup   uint64
-	Pointer uint64
-	Import  string
+	Fixup        uint64
+	Pointer      uint64
+	Import       string
+	ImportAddend int64
 }
 
 func (d DyldChainedPtrArm64eAuthBind) IsRebase() bool {
@@ -435,7 +513,7 @@ func (d DyldChainedPtrArm64eAuthBind) Offset() uint64 {
 	return d.Fixup
 }
 func (d DyldChainedPtrArm64eAuthBind) Addend() uint64 {
-	return 0
+	return uint64(d.ImportAddend)
 }
 func (d DyldChainedPtrArm64eAuthBind) Ordinal() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 0, 16)
@@ -596,9 +674,10 @@ func (d DyldChainedPtr64RebaseOffset) String(baseAddr ...uint64) string {
 
 // DYLD_CHAINED_PTR_ARM64E_USERLAND24
 type DyldChainedPtrArm64eBind24 struct {
-	Fixup   uint64
-	Pointer uint64
-	Import  string
+	Fixup        uint64
+	Pointer      uint64
+	Import       string
+	ImportAddend int64
 }
 
 func (d DyldChainedPtrArm64eBind24) IsRebase() bool {
@@ -617,14 +696,17 @@ func (d DyldChainedPtrArm64eBind24) Zero() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 24, 8)
 }
 func (d DyldChainedPtrArm64eBind24) Addend() uint64 {
+	return uint64(d.SignExtendedAddend())
+}
+func (d DyldChainedPtrArm64eBind24) InlineAddend() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 32, 19)
 }
 func (d DyldChainedPtrArm64eBind24) SignExtendedAddend() int64 {
-	addend := d.Addend()
+	addend := d.InlineAddend()
 	if (addend & 0x40000) != 0 {
-		return int64(addend | 0xFFFFFFFFFFFC0000)
+		return int64(addend|0xFFFFFFFFFFFC0000) + d.ImportAddend
 	}
-	return int64(addend)
+	return int64(addend) + d.ImportAddend
 }
 func (d DyldChainedPtrArm64eBind24) Next() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 51, 11)
@@ -653,9 +735,10 @@ func (d DyldChainedPtrArm64eBind24) String(baseAddr ...uint64) string {
 
 // DYLD_CHAINED_PTR_ARM64E_USERLAND24
 type DyldChainedPtrArm64eAuthBind24 struct {
-	Fixup   uint64
-	Pointer uint64
-	Import  string
+	Fixup        uint64
+	Pointer      uint64
+	Import       string
+	ImportAddend int64
 }
 
 func (d DyldChainedPtrArm64eAuthBind24) IsRebase() bool {
@@ -668,7 +751,7 @@ func (d DyldChainedPtrArm64eAuthBind24) Offset() uint64 {
 	return d.Fixup
 }
 func (d DyldChainedPtrArm64eAuthBind24) Addend() uint64 {
-	return 0
+	return uint64(d.ImportAddend)
 }
 func (d DyldChainedPtrArm64eAuthBind24) Ordinal() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 0, 24)
@@ -740,8 +823,13 @@ func (d DyldChainedPtr64Bind) Ordinal() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 0, 24)
 }
 func (d DyldChainedPtr64Bind) Addend() uint64 {
-	inlineAddend := types.ExtractBits(uint64(d.Pointer), 24, 8) // 0 thru 255
-	return inlineAddend + uint64(d.ImportAddend)
+	return uint64(d.SignedAddend())
+}
+func (d DyldChainedPtr64Bind) InlineAddend() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 24, 8) // 0 thru 255
+}
+func (d DyldChainedPtr64Bind) SignedAddend() int64 {
+	return int64(d.InlineAddend()) + d.ImportAddend
 }
 func (d DyldChainedPtr64Bind) Reserved() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 32, 19) // all zeros
@@ -771,7 +859,7 @@ func (d DyldChainedPtr64Bind) String(baseAddr ...uint64) string {
 		d.Kind(),
 		d.Next(),
 		d.Ordinal(),
-		d.Addend(),
+		d.SignedAddend(),
 	)
 }
 
@@ -889,9 +977,10 @@ func (d DyldChainedPtr32Rebase) String(baseAddr ...uint64) string {
 
 // DYLD_CHAINED_PTR_32
 type DyldChainedPtr32Bind struct {
-	Fixup   uint64
-	Pointer uint32
-	Import  string
+	Fixup        uint64
+	Pointer      uint32
+	Import       string
+	ImportAddend int64
 }
 
 func (d DyldChainedPtr32Bind) IsRebase() bool {
@@ -907,7 +996,13 @@ func (d DyldChainedPtr32Bind) Ordinal() uint64 {
 	return uint64(types.ExtractBits(uint64(d.Pointer), 0, 20))
 }
 func (d DyldChainedPtr32Bind) Addend() uint64 {
+	return uint64(d.SignedAddend())
+}
+func (d DyldChainedPtr32Bind) InlineAddend() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 20, 6) // 0 thru 63
+}
+func (d DyldChainedPtr32Bind) SignedAddend() int64 {
+	return int64(d.InlineAddend()) + d.ImportAddend
 }
 func (d DyldChainedPtr32Bind) Next() uint32 {
 	return uint32(types.ExtractBits(uint64(d.Pointer), 26, 5)) // 4-byte stride
@@ -928,7 +1023,7 @@ func (d DyldChainedPtr32Bind) String(baseAddr ...uint64) string {
 	if len(baseAddr) > 0 {
 		d.Fixup += baseAddr[0]
 	}
-	return fmt.Sprintf("0x%08x:  raw: 0x%08x %16s: (next:%02d ordinal:%05x addend:%d)", d.Fixup, d.Pointer, d.Kind(), d.Next(), d.Ordinal(), d.Addend())
+	return fmt.Sprintf("0x%08x:  raw: 0x%08x %16s: (next:%02d ordinal:%05x addend:%d)", d.Fixup, d.Pointer, d.Kind(), d.Next(), d.Ordinal(), d.SignedAddend())
 }
 
 // DYLD_CHAINED_PTR_32_CACHE
@@ -1023,7 +1118,10 @@ func (d DyldChainedPtrArm64eSharedCacheRebase) Target() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 0, 34) // runtimeOffset - offset from the start of the shared cache
 }
 func (d DyldChainedPtrArm64eSharedCacheRebase) High8() uint64 {
-	return types.ExtractBits(uint64(d.Pointer), 34, 8) // TODO: check that this is correct when src is released
+	return types.ExtractBits(uint64(d.Pointer), 34, 8)
+}
+func (d DyldChainedPtrArm64eSharedCacheRebase) UnpackedTarget() uint64 {
+	return d.High8()<<56 | d.Target()
 }
 func (d DyldChainedPtrArm64eSharedCacheRebase) Next() uint64 {
 	return types.ExtractBits(uint64(d.Pointer), 52, 11) // 8-byte stide
@@ -1221,5 +1319,159 @@ func (d DyldChainedPtrArm64eAuthSegmentedRebase) String(baseAddr ...uint64) stri
 		KeyName(d.Key()),
 		d.AddrDiv(),
 		d.Diversity(),
+	)
+}
+
+// DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3
+type DyldChainedPtrArm64eSharedCacheV3Rebase struct {
+	Fixup   uint64
+	Pointer uint64
+}
+
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) IsRebase() bool {
+	return true
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) IsBind() bool {
+	return false
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) Offset() uint64 {
+	return d.Fixup
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) Raw() uint64 {
+	return d.Pointer
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) Target() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 0, 51) // pointerValue
+}
+
+// UnpackedTarget reconstructs the plain slide-info-v3 pointer. Apple stores
+// the top byte in bits 43..50 and the low 43 address bits in bits 0..42.
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) UnpackedTarget() uint64 {
+	return (d.Target()&0x0007F80000000000)<<13 | (d.Target() & 0x000007FFFFFFFFFF)
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) Next() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 51, 11) // 8-byte stride
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) Auth() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 63, 1) // == 0
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) Kind() string {
+	return "shared-cache-v3-rebase"
+}
+func (d DyldChainedPtrArm64eSharedCacheV3Rebase) String(baseAddr ...uint64) string {
+	var baddr uint64
+	if len(baseAddr) > 0 {
+		baddr = baseAddr[0]
+	}
+	return fmt.Sprintf("0x%08x:  raw: 0x%016x %16s: (next: %03d, target: %#x)",
+		d.Fixup+baddr,
+		d.Pointer,
+		d.Kind(),
+		d.Next(),
+		d.UnpackedTarget(),
+	)
+}
+
+// DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3
+type DyldChainedPtrArm64eSharedCacheV3AuthRebase struct {
+	Fixup   uint64
+	Pointer uint64
+}
+
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) IsRebase() bool {
+	return true
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) IsBind() bool {
+	return false
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Offset() uint64 {
+	return d.Fixup
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Raw() uint64 {
+	return d.Pointer
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Target() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 0, 32) // offsetFromSharedCacheBase
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Diversity() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 32, 16)
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) AddrDiv() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 48, 1)
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Key() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 49, 2)
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Next() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 51, 11) // 8-byte stride
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Auth() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 63, 1) // == 1
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) Kind() string {
+	return "shared-cache-v3-auth-rebase"
+}
+func (d DyldChainedPtrArm64eSharedCacheV3AuthRebase) String(baseAddr ...uint64) string {
+	var baddr uint64
+	if len(baseAddr) > 0 {
+		baddr = baseAddr[0]
+	}
+	return fmt.Sprintf("0x%08x:  raw: 0x%016x %16s: (next: %03d, target: %#x, key: %s, addrDiv: %d, diversity: 0x%04x)",
+		d.Fixup+baddr,
+		d.Pointer,
+		d.Kind(),
+		d.Next(),
+		d.Target()+baddr,
+		KeyName(d.Key()),
+		d.AddrDiv(),
+		d.Diversity(),
+	)
+}
+
+// DYLD_CHAINED_PTR_SHARED_CACHE_V2
+type DyldChainedPtrSharedCacheV2Rebase struct {
+	Fixup   uint64
+	Pointer uint64
+}
+
+func (d DyldChainedPtrSharedCacheV2Rebase) IsRebase() bool {
+	return true
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) IsBind() bool {
+	return false
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) Offset() uint64 {
+	return d.Fixup
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) Raw() uint64 {
+	return d.Pointer
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) Target() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 0, 40) // runtimeOffset - offset from the start of the shared cache
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) Next() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 40, 16) // 4-byte stride
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) High8() uint64 {
+	return types.ExtractBits(uint64(d.Pointer), 56, 8)
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) UnpackedTarget() uint64 {
+	return d.High8()<<56 | d.Target()
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) Kind() string {
+	return "shared-cache-v2-rebase"
+}
+func (d DyldChainedPtrSharedCacheV2Rebase) String(baseAddr ...uint64) string {
+	var baddr uint64
+	if len(baseAddr) > 0 {
+		baddr = baseAddr[0]
+	}
+	return fmt.Sprintf("0x%08x:  raw: 0x%016x %16s: (next: %03d, target: %#x, high8: 0x%02x)",
+		d.Fixup+baddr,
+		d.Pointer,
+		d.Kind(),
+		d.Next(),
+		d.UnpackedTarget()+baddr,
+		d.High8(),
 	)
 }
