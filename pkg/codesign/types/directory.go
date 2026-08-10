@@ -22,9 +22,11 @@ var (
 // CodeDirectory object
 type CodeDirectory struct {
 	BlobHeader
+	Slot           SlotType          `json:"slot,omitempty"`
 	ID             string            `json:"id,omitempty"`
 	TeamID         string            `json:"team_id,omitempty"`
 	Scatter        Scatter           `json:"scatter,omitempty"`
+	Scatters       []Scatter         `json:"scatters,omitempty"`
 	CDHash         string            `json:"cd_hash,omitempty"`
 	SpecialSlots   []SpecialSlot     `json:"special_slots,omitempty"`
 	CodeSlots      []CodeSlot        `json:"code_slots,omitempty"`
@@ -43,10 +45,12 @@ type SpecialSlot struct {
 }
 
 type CodeSlot struct {
-	Index uint32 `json:"index,omitempty"`
-	Page  uint32 `json:"page,omitempty"`
-	Hash  []byte `json:"hash,omitempty"`
-	Desc  string `json:"desc,omitempty"`
+	Index         uint32 `json:"index,omitempty"`
+	Page          uint64 `json:"page,omitempty"`
+	TargetOffset  uint64 `json:"target_offset,omitempty"`
+	ScatterMapped bool   `json:"scatter_mapped,omitempty"`
+	Hash          []byte `json:"hash,omitempty"`
+	Desc          string `json:"desc,omitempty"`
 }
 
 type hashType uint8

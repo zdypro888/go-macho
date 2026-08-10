@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 const (
@@ -136,7 +137,8 @@ type SuperBlob struct {
 func NewSuperBlob(magic Magic) SuperBlob {
 	return SuperBlob{
 		SbHeader: SbHeader{
-			Magic: magic,
+			Magic:  magic,
+			Length: uint32(binary.Size(SbHeader{})),
 		},
 	}
 }
@@ -147,8 +149,12 @@ func (s *SuperBlob) AddBlob(typ SlotType, blob Blob) {
 	}
 	s.Index = append(s.Index, idx)
 	s.Blobs = append(s.Blobs, blob)
-	s.Count++
-	s.Length += uint32(binary.Size(BlobHeader{}.Magic)) + blob.Length + uint32(binary.Size(idx))
+	s.Count = uint32(len(s.Index))
+	if size, err := s.encodedSize(); err == nil {
+		s.Length = size
+	} else {
+		s.Length = 0
+	}
 }
 
 func (s *SuperBlob) GetBlob(typ SlotType) (Blob, error) {
@@ -161,19 +167,45 @@ func (s *SuperBlob) GetBlob(typ SlotType) (Blob, error) {
 }
 
 func (s *SuperBlob) Size() int {
-	sz := binary.Size(s.SbHeader) + binary.Size(BlobHeader{}) + binary.Size(s.Index)
-	for _, blob := range s.Blobs {
-		sz += binary.Size(blob.BlobHeader)
-		sz += len(blob.Data)
+	size, err := s.encodedSize()
+	if err != nil || uint64(size) > uint64(math.MaxInt) {
+		return -1
 	}
-	return sz
+	return int(size)
+}
+
+func (s *SuperBlob) encodedSize() (uint32, error) {
+	if len(s.Index) != len(s.Blobs) {
+		return 0, fmt.Errorf("SuperBlob has %d indexes for %d blobs", len(s.Index), len(s.Blobs))
+	}
+	total := uint64(binary.Size(SbHeader{})) + uint64(len(s.Index))*uint64(binary.Size(BlobIndex{}))
+	for index, blob := range s.Blobs {
+		actualLength := uint64(binary.Size(BlobHeader{})) + uint64(len(blob.Data))
+		if uint64(blob.Length) != actualLength {
+			return 0, fmt.Errorf("blob %d declares length %d, actual %d", index, blob.Length, actualLength)
+		}
+		if total > math.MaxUint32-actualLength {
+			return 0, fmt.Errorf("SuperBlob length exceeds uint32")
+		}
+		total += actualLength
+	}
+	return uint32(total), nil
 }
 
 func (s *SuperBlob) Write(buf *bytes.Buffer, o binary.ByteOrder) error {
-	off := uint32(binary.Size(s.SbHeader) + binary.Size(s.Index))
+	length, err := s.encodedSize()
+	if err != nil {
+		return err
+	}
+	s.Count = uint32(len(s.Index))
+	s.Length = length
+	off64 := uint64(binary.Size(s.SbHeader)) + uint64(len(s.Index))*uint64(binary.Size(BlobIndex{}))
 	for i := range s.Index {
-		s.Index[i].Offset = off
-		off += s.Blobs[i].Length
+		if off64 > math.MaxUint32 {
+			return fmt.Errorf("SuperBlob blob %d offset %#x exceeds uint32", i, off64)
+		}
+		s.Index[i].Offset = uint32(off64)
+		off64 += uint64(s.Blobs[i].Length)
 	}
 	if err := binary.Write(buf, o, s.SbHeader); err != nil {
 		return fmt.Errorf("failed to write SuperBlob header to buffer: %v", err)

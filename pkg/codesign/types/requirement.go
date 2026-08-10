@@ -9,22 +9,30 @@ import (
 	"io"
 	"math"
 	"strings"
-
-	mtypes "github.com/zdypro888/go-macho/types"
+	"time"
 )
 
 // Requirement object
 type Requirement struct {
 	RequirementsBlob
 	Requirements
-	Detail string `json:"detail,omitempty"`
+	Detail string             `json:"detail,omitempty"`
+	Opaque *OpaqueRequirement `json:"opaque,omitempty"`
+}
+
+// OpaqueRequirement preserves a bounded requirement encoding whose semantics
+// are not decoded by this package. The embedded header and payload are enough
+// to reproduce the exact inner requirement blob.
+type OpaqueRequirement struct {
+	RequirementsBlob
+	Payload []byte `json:"payload,omitempty"`
 }
 
 // RequirementsBlob object
 type RequirementsBlob struct {
 	Magic  Magic  `json:"magic,omitempty"`  // magic number
 	Length uint32 `json:"length,omitempty"` // total length of blob
-	Data   uint32 `json:"data,omitempty"`   // zero for dyld shared cache
+	Data   uint32 `json:"data,omitempty"`   // vector count for MAGIC_REQUIREMENTS; requirement kind for MAGIC_REQUIREMENT
 }
 
 type RequirementType uint32
@@ -104,11 +112,15 @@ const (
 	opCertPolicy                       // Certificate policy by OID [cert index; oid; match suffix]
 	opNamedAnchor                      // named anchor type
 	opNamedCode                        // named subroutine
+	opPlatform                         // platform constraint [integer]
+	opNotarized                        // has a developer id + ticket
+	opCertFieldDate                    // extension value as timestamp [cert index; oid; match suffix]
+	opLegacyDevID                      // meets legacy pre-notarization policy
 	exprOpCount                        // (total opcode count in use)
 )
 
 func (o exprOp) String() string {
-	return [...]string{
+	names := [...]string{
 		"False",
 		"True",
 		"Ident",
@@ -129,11 +141,21 @@ func (o exprOp) String() string {
 		"CertPolicy",
 		"NamedAnchor",
 		"NamedCode",
+		"Platform",
+		"Notarized",
+		"CertFieldDate",
+		"LegacyDevID",
 		"exprOpCount",
-	}[0]
+	}
+	if uint32(o) >= uint32(len(names)) {
+		return fmt.Sprintf("exprOp(%d)", o)
+	}
+	return names[o]
 }
 
 type matchOp uint32
+
+const requirementStackLimit = 1000
 
 // match suffix opcodes
 const (
@@ -146,10 +168,16 @@ const (
 	matchGreaterThan                 // greater than (string with numeric comparison)
 	matchLessEqual                   // less or equal (string with numeric comparison)
 	matchGreaterEqual                // greater or equal (string with numeric comparison)
+	matchOn                          // on (timestamp comparison)
+	matchBefore                      // before (timestamp comparison)
+	matchAfter                       // after (timestamp comparison)
+	matchOnOrBefore                  // on or before (timestamp comparison)
+	matchOnOrAfter                   // on or after (timestamp comparison)
+	matchAbsent                      // not present
 )
 
 func (o matchOp) String() string {
-	return [...]string{
+	names := [...]string{
 		"Exists",
 		"Equal",
 		"Contains",
@@ -159,7 +187,17 @@ func (o matchOp) String() string {
 		"GreaterThan",
 		"LessEqual",
 		"GreaterEqual",
-	}[0]
+		"On",
+		"Before",
+		"After",
+		"OnOrBefore",
+		"OnOrAfter",
+		"Absent",
+	}
+	if uint32(o) >= uint32(len(names)) {
+		return fmt.Sprintf("matchOp(%d)", o)
+	}
+	return names[o]
 }
 
 const (
@@ -171,22 +209,107 @@ const (
 func getData(r *bytes.Reader) ([]byte, error) {
 	var idLength uint32
 
-	err := binary.Read(r, binary.BigEndian, &idLength)
-	if err != nil {
+	if err := binary.Read(r, binary.BigEndian, &idLength); err != nil {
 		return nil, err
 	}
 
-	// 4 byte align length
-	alignedLength := uint32(mtypes.RoundUp(uint64(idLength), 4))
-
-	data := make([]byte, alignedLength)
-
-	_, err = r.Read(data)
-	if err != nil {
+	// Requirement byte strings are padded to a four-byte boundary. Keep the
+	// arithmetic wide and prove that the complete padded value is present before
+	// allocating: bytes.Reader.Read may otherwise return a short read with nil.
+	length := uint64(idLength)
+	alignedLength := (length + 3) &^ uint64(3)
+	if alignedLength > uint64(r.Len()) {
+		return nil, fmt.Errorf("requirement data length %d (aligned %d) exceeds %d remaining bytes", length, alignedLength, r.Len())
+	}
+	data := make([]byte, int(alignedLength))
+	if _, err := io.ReadFull(r, data); err != nil {
 		return nil, err
 	}
+	return data[:int(length)], nil
+}
 
-	return data[:idLength], nil
+func isRequirementKeyword(value string) bool {
+	switch value {
+	case "guest", "host", "designated", "library", "plugin",
+		"or", "and", "always", "true", "never", "false",
+		"identifier", "cdhash", "platform", "notarized", "legacy",
+		"anchor", "apple", "generic", "certificate", "cert",
+		"trusted", "info", "entitlement", "exists", "absent",
+		"leaf", "root", "timestamp":
+		return true
+	default:
+		return false
+	}
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9'
+}
+
+func isASCIIWhitespace(value byte) bool {
+	switch value {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	default:
+		return false
+	}
+}
+
+// formatRequirementData mirrors Apple Requirement::Dumper::data: use a bare
+// token when it is unambiguous, an escaped quoted token for printable bytes,
+// and a hexadecimal literal for binary data. dotOkay is used for dictionary
+// and certificate-field keys, where periods are valid in bare tokens.
+func formatRequirementData(data []byte, dotOkay bool) string {
+	const (
+		dataSimple = iota
+		dataPrintable
+		dataBinary
+	)
+	mode := dataSimple
+	for index, value := range data {
+		switch {
+		case isASCIIAlphaNumeric(value) || (value == '.' && dotOkay):
+			if index == 0 && value >= '0' && value <= '9' {
+				mode = dataPrintable
+			}
+		case value >= 0x21 && value <= 0x7e || isASCIIWhitespace(value):
+			if mode == dataSimple {
+				mode = dataPrintable
+			}
+		default:
+			mode = dataBinary
+		}
+		if mode == dataBinary {
+			break
+		}
+	}
+	if mode == dataSimple {
+		if !isRequirementKeyword(string(data)) {
+			return string(data)
+		}
+		mode = dataPrintable
+	}
+	if mode == dataBinary {
+		return fmt.Sprintf("0x%x", data)
+	}
+
+	var out strings.Builder
+	out.Grow(len(data) + 2)
+	out.WriteByte('"')
+	for _, value := range data {
+		if value == '\\' || value == '"' {
+			out.WriteByte('\\')
+		}
+		out.WriteByte(value)
+	}
+	out.WriteByte('"')
+	return out.String()
+}
+
+func formatRequirementHash(data []byte) string {
+	return fmt.Sprintf("H\"%x\"", data)
 }
 
 func getMatch(r *bytes.Reader) (string, error) {
@@ -204,51 +327,86 @@ func getMatch(r *bytes.Reader) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" = \"%s\"", data), nil
+		return " = " + formatRequirementData(data, false), nil
 	case matchContains:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" ~ %s", data), nil
+		return " ~ " + formatRequirementData(data, false), nil
 	case matchBeginsWith:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" = %s*", data), nil
+		return " = " + formatRequirementData(data, false) + "*", nil
 	case matchEndsWith:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" = *%s", data), nil
+		return " = *" + formatRequirementData(data, false), nil
 	case matchLessThan:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" < %s", data), nil
+		return " < " + formatRequirementData(data, false), nil
 	case matchGreaterThan:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" >= %s", data), nil
+		return " > " + formatRequirementData(data, false), nil
 	case matchLessEqual:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" <= %s", data), nil
+		return " <= " + formatRequirementData(data, false), nil
 	case matchGreaterEqual:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf(" > %s", data), nil
+		return " >= " + formatRequirementData(data, false), nil
+	case matchOn, matchBefore, matchAfter, matchOnOrBefore, matchOnOrAfter:
+		var absoluteTime int64
+		if err := binary.Read(r, binary.BigEndian, &absoluteTime); err != nil {
+			return "", err
+		}
+		operator := map[matchOp]string{
+			matchOn:         " = ",
+			matchBefore:     " < ",
+			matchAfter:      " > ",
+			matchOnOrBefore: " <= ",
+			matchOnOrAfter:  " >= ",
+		}[op]
+		return operator + formatCFAbsoluteTime(absoluteTime), nil
+	case matchAbsent:
+		return " absent", nil
 	}
 	return "", fmt.Errorf("MATCH OPCODE %d NOT UNDERSTOOD", op)
+}
+
+func formatCFAbsoluteTime(value int64) string {
+	const cfAbsoluteTimeUnixEpoch = int64(978307200) // 2001-01-01 00:00:00 UTC
+	if value > math.MaxInt64-cfAbsoluteTimeUnixEpoch {
+		return fmt.Sprintf("<CFAbsoluteTime %d>", value)
+	}
+	return "<" + time.Unix(value+cfAbsoluteTimeUnixEpoch, 0).UTC().Format("2006-01-02 15:04:05 -0700") + ">"
+}
+
+func skipGenericRequirementData(r *bytes.Reader) error {
+	var length uint32
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		return err
+	}
+	if uint64(length) > uint64(r.Len()) {
+		return fmt.Errorf("generic requirement payload length %d exceeds %d remaining bytes", length, r.Len())
+	}
+	_, err := r.Seek(int64(length), io.SeekCurrent)
+	return err
 }
 
 const (
@@ -309,7 +467,7 @@ func getOid(r *bytes.Reader) (uint32, error) {
 // ref https://opensource.apple.com/source/Security/Security-59306.80.4/
 // ref http://oid-info.com/get/1.2.840.113635.100.6.2.6
 func toOID(data []byte) string {
-	var oidStr string
+	var oidStr strings.Builder
 
 	r := bytes.NewReader(data)
 
@@ -319,7 +477,7 @@ func toOID(data []byte) string {
 	}
 
 	q1 := uint32(math.Min(float64(oid1)/40, 2))
-	oidStr += fmt.Sprintf("%d.%d", q1, oid1-q1*40)
+	oidStr.WriteString(fmt.Sprintf("%d.%d", q1, oid1-q1*40))
 
 	for {
 		oid, err := getOid(r)
@@ -330,13 +488,18 @@ func toOID(data []byte) string {
 			return ""
 		}
 
-		oidStr += fmt.Sprintf(".%d", uint32(oid))
+		oidStr.WriteString(fmt.Sprintf(".%d", uint32(oid)))
 	}
 
-	return oidStr
+	return oidStr.String()
 }
 
-func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
+func evalExpression(r *bytes.Reader, syntaxLevel, depth int) (string, error) {
+	depth--
+	if depth <= 0 {
+		return "", fmt.Errorf("requirement expression exceeds stack limit %d", requirementStackLimit)
+	}
+
 	var op exprOp
 
 	err := binary.Read(r, binary.BigEndian, &op)
@@ -344,7 +507,7 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		return "", err
 	}
 
-	switch op {
+	switch op & ^opFlagMask {
 	case opFalse:
 		return "never", nil
 	case opTrue:
@@ -354,7 +517,7 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("identifier \"%s\"", data), nil
+		return "identifier " + formatRequirementData(data, false), nil
 	case opAppleAnchor:
 		return "anchor apple", nil
 	case opAppleGenericAnchor:
@@ -367,8 +530,8 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		data, err := getData(r)
 		if err != nil {
 			return "", err
-		} // TODO data is a hashData str
-		return fmt.Sprintf("certificate %s = %s", slot, data), nil
+		}
+		return fmt.Sprintf("certificate %s = %s", slot, formatRequirementHash(data)), nil
 	case opInfoKeyValue:
 		dot, err := getData(r)
 		if err != nil {
@@ -377,20 +540,20 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		data, err := getData(r)
 		if err != nil {
 			return "", err
-		} // TODO dot is a dot str
-		return fmt.Sprintf("info[%s] = %s", dot, data), nil
+		}
+		return fmt.Sprintf("info[%s] = %s", formatRequirementData(dot, true), formatRequirementData(data, false)), nil
 	case opAnd:
 		var out string
 		if syntaxLevel < slAnd {
 			out += "("
 		}
-		part, err := evalExpression(r, slAnd)
+		part, err := evalExpression(r, slAnd, depth)
 		if err != nil {
 			return "", err
 		}
 		out += part
 		out += " and "
-		part, err = evalExpression(r, slAnd)
+		part, err = evalExpression(r, slAnd, depth)
 		if err != nil {
 			return "", err
 		}
@@ -404,13 +567,13 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		if syntaxLevel < slOr {
 			out += "("
 		}
-		part, err := evalExpression(r, slOr)
+		part, err := evalExpression(r, slOr, depth)
 		if err != nil {
 			return "", err
 		}
 		out += part
 		out += " or "
-		part, err = evalExpression(r, slOr)
+		part, err = evalExpression(r, slOr, depth)
 		if err != nil {
 			return "", err
 		}
@@ -420,7 +583,7 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		}
 		return out, nil
 	case opNot:
-		part, err := evalExpression(r, slPrimary)
+		part, err := evalExpression(r, slPrimary, depth)
 		if err != nil {
 			return "", err
 		}
@@ -429,8 +592,8 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		data, err := getData(r)
 		if err != nil {
 			return "", err
-		} // TODO data is a hashData str
-		return fmt.Sprintf(" cdhash %s", data), nil
+		}
+		return "cdhash " + formatRequirementHash(data), nil
 	case opInfoKeyField:
 		data, err := getData(r)
 		if err != nil {
@@ -439,8 +602,8 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		match, err := getMatch(r)
 		if err != nil {
 			return "", err
-		} // TODO data is a dot str
-		return fmt.Sprintf("info[%s] %s", data, match), nil
+		}
+		return fmt.Sprintf("info[%s]%s", formatRequirementData(data, true), match), nil
 	case opEntitlementField:
 		data, err := getData(r)
 		if err != nil {
@@ -449,8 +612,8 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		match, err := getMatch(r)
 		if err != nil {
 			return "", err
-		} // TODO data is a dot str
-		return fmt.Sprintf("entitlement[%s] %s", data, match), nil
+		}
+		return fmt.Sprintf("entitlement[%s]%s", formatRequirementData(data, true), match), nil
 	case opCertField:
 		slot, err := getCertSlot(r)
 		if err != nil {
@@ -463,8 +626,8 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		match, err := getMatch(r)
 		if err != nil {
 			return "", err
-		} // TODO data is a dot str
-		return fmt.Sprintf("certificate %s[%s] %s", slot, data, match), nil
+		}
+		return fmt.Sprintf("certificate %s[%s]%s", slot, formatRequirementData(data, true), match), nil
 	case opCertGeneric:
 		slot, err := getCertSlot(r)
 		if err != nil {
@@ -478,7 +641,7 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("certificate %s[field.%s] %s", slot, toOID(data), match), nil
+		return fmt.Sprintf("certificate %s[field.%s]%s", slot, toOID(data), match), nil
 	case opCertPolicy:
 		slot, err := getCertSlot(r)
 		if err != nil {
@@ -492,7 +655,7 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("certificate %s [policy.%s] %s", slot, toOID(data), match), nil
+		return fmt.Sprintf("certificate %s[policy.%s]%s", slot, toOID(data), match), nil
 	case opTrustedCert:
 		slot, err := getCertSlot(r)
 		if err != nil {
@@ -506,58 +669,84 @@ func evalExpression(r *bytes.Reader, syntaxLevel int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("anchor apple %s", string(data)), nil
+		return "anchor apple " + formatRequirementData(data, false), nil
 	case opNamedCode:
 		data, err := getData(r)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("(%s)", string(data)), nil
+		return "(" + formatRequirementData(data, false) + ")", nil
+	case opPlatform:
+		var platform int32
+		if err := binary.Read(r, binary.BigEndian, &platform); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("platform = %d", platform), nil
+	case opNotarized:
+		return "notarized", nil
+	case opCertFieldDate:
+		slot, err := getCertSlot(r)
+		if err != nil {
+			return "", err
+		}
+		oid, err := getData(r)
+		if err != nil {
+			return "", err
+		}
+		match, err := getMatch(r)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("certificate %s[timestamp.%s]%s", slot, toOID(oid), match), nil
+	case opLegacyDevID:
+		return "legacy", nil
 	default:
 		if (op & opGenericFalse) != 0 {
-			return fmt.Sprintf(" false /* opcode %d */", op & ^opFlagMask), nil
+			if err := skipGenericRequirementData(r); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("false /* opcode %d */", op & ^opFlagMask), nil
 		} else if (op & opGenericSkip) != 0 {
-			return fmt.Sprintf(" /* opcode %d */", op & ^opFlagMask), nil
+			if err := skipGenericRequirementData(r); err != nil {
+				return "", err
+			}
+			return evalExpression(r, syntaxLevel, depth)
 		}
-		return fmt.Sprintf("OPCODE %d NOT UNDERSTOOD (ending print)", op), nil
+		return "", fmt.Errorf("OPCODE %d NOT UNDERSTOOD", op)
 	}
 }
 
 // ParseRequirements parses the requirements set bytes
 func ParseRequirements(r *bytes.Reader, reqs Requirements) (string, error) {
 	// NOTE: codesign -d -r- MACHO (to display requirement sets)
-	r.Seek(int64(reqs.Offset), io.SeekStart)
+	if _, err := r.Seek(int64(reqs.Offset), io.SeekStart); err != nil {
+		return "", fmt.Errorf("failed to seek to %s expression at offset %#x: %w", reqs.Type, reqs.Offset, err)
+	}
 
+	var prefix string
 	switch reqs.Type {
 	case HostRequirementType:
-		var reqSet []string
-		for {
-			rsPart, err := evalExpression(r, slTop)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return "", err
-			}
-			reqSet = append(reqSet, rsPart)
-		}
-		return "host => " + strings.Join(reqSet, " "), nil
+		prefix = "host => "
+	case GuestRequirementType:
+		prefix = "guest => "
 	case DesignatedRequirementType:
-		var reqSet []string
-		for {
-			rsPart, err := evalExpression(r, slTop)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return "", err
-			}
-			reqSet = append(reqSet, rsPart)
-		}
-		return strings.Join(reqSet, " "), nil
+		// Preserve the historical Detail format for designated requirements.
+	case LibraryRequirementType:
+		prefix = "library => "
+	case PluginRequirementType:
+		prefix = "plugin => "
 	default:
 		return "", fmt.Errorf("failed to dump requirements set; found unsupported codesign requirement type '%s', please notify author", reqs.Type)
 	}
+
+	detail, err := evalExpression(r, slTop, requirementStackLimit)
+	if err != nil {
+		return "", err
+	}
+	if r.Len() != 0 {
+		return "", fmt.Errorf("requirement expression has %d trailing bytes", r.Len())
+	}
+	return prefix + detail, nil
 }
 
 // CreateRequirements creates a requirements set cs blob
