@@ -38,6 +38,24 @@ type ProtocolT struct {
 	ClassPropertiesVMAddr     uint64
 }
 
+// ProtocolT32 is the 32-bit on-disk protocol_t layout, including its optional
+// tail fields. The Size field determines which tail fields are actually present.
+type ProtocolT32 struct {
+	IsaVMAddr                     uint32
+	NameVMAddr                    uint32
+	ProtocolsVMAddr               uint32
+	InstanceMethodsVMAddr         uint32
+	ClassMethodsVMAddr            uint32
+	OptionalInstanceMethodsVMAddr uint32
+	OptionalClassMethodsVMAddr    uint32
+	InstancePropertiesVMAddr      uint32
+	Size                          uint32
+	Flags                         uint32
+	ExtendedMethodTypesVMAddr     uint32
+	DemangledNameVMAddr           uint32
+	ClassPropertiesVMAddr         uint32
+}
+
 type Protocol struct {
 	Name                    string
 	Ptr                     uint64

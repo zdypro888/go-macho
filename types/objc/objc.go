@@ -211,7 +211,7 @@ func (i ImageInfo) HasSwift() bool {
 }
 
 const (
-	bigSignedMethodListFlag              uint64 = 0x8000000000000000
+	relativeMethodTypesAreDirectFlag     uint32 = 0x20000000
 	relativeMethodSelectorsAreDirectFlag uint32 = 0x40000000
 	smallMethodListFlag                  uint32 = 0x80000000
 	METHOD_LIST_FLAGS_MASK               uint32 = 0xffff0003
@@ -228,31 +228,6 @@ const (
 	METHOD_LIST_IS_SORTED  MLFlags = 2
 	METHOD_LIST_FIXED_UP   MLFlags = 3
 )
-
-type MLKind uint32
-
-const (
-	kindMask = 3
-	// Note: method_invoke detects small methods by detecting 1 in the low
-	// bit. Any change to that will require a corresponding change to
-	// method_invoke.
-	big MLKind = 0
-	// `small` encompasses both small and small direct methods. We
-	// distinguish those cases by doing a range check against the shared
-	// cache.
-	small       MLKind = 1
-	bigSigned   MLKind = 2
-	bigStripped MLKind = 3 // ***HACK: This is a TEMPORARY HACK FOR EXCLAVEKIT. It MUST go away.
-)
-
-type methodPtr uint64
-
-func (m methodPtr) Kind() MLKind {
-	return MLKind(m & kindMask)
-}
-func (m methodPtr) Pointer() uint64 {
-	return uint64(m & ^methodPtr(kindMask))
-}
 
 type EntryList struct {
 	Entsize uint32
@@ -294,6 +269,15 @@ func (ml MethodList) FixedUp() bool {
 func (ml MethodList) UsesDirectOffsetsToSelectors() bool {
 	return (ml.EntSizeAndFlags & relativeMethodSelectorsAreDirectFlag) != 0
 }
+
+// UsesDirectOffsetsToTypes reports whether a relative method list stores each
+// method's type encoding as a direct offset into the shared cache's relative
+// method types buffer (which immediately follows the selector strings buffer),
+// rather than as a self-relative offset from the typesOffset field. Introduced
+// in the iOS 27 / macOS 27 dyld_shared_cache layout.
+func (ml MethodList) UsesDirectOffsetsToTypes() bool {
+	return (ml.EntSizeAndFlags & relativeMethodTypesAreDirectFlag) != 0
+}
 func (ml MethodList) UsesRelativeOffsets() bool {
 	return (ml.EntSizeAndFlags & smallMethodListFlag) != 0
 }
@@ -323,6 +307,12 @@ type MethodT struct {
 	NameVMAddr  uint64 // SEL
 	TypesVMAddr uint64 // const char *
 	ImpVMAddr   uint64 // IMP
+}
+
+type MethodT32 struct {
+	NameVMAddr  uint32 // SEL
+	TypesVMAddr uint32 // const char *
+	ImpVMAddr   uint32 // IMP
 }
 
 type RelativeMethodT struct {
@@ -358,7 +348,7 @@ func (m *Method) ReturnType() string {
 
 func (m *Method) ArgumentType(index int) string {
 	args := getArguments(m.Types)
-	if 0 < len(args) && index <= len(args) {
+	if index >= 0 && index < len(args) {
 		return args[index].DecType
 	}
 	return "<error>"
@@ -372,6 +362,11 @@ type PropertyList struct {
 type PropertyT struct {
 	NameVMAddr       uint64
 	AttributesVMAddr uint64
+}
+
+type PropertyT32 struct {
+	NameVMAddr       uint32
+	AttributesVMAddr uint32
 }
 
 type Property struct {
@@ -402,6 +397,14 @@ type CFString64Type struct {
 	Info      uint64 // flag bits
 	Data      uint64 // char * (64-bit pointer)
 	Length    uint64 // number of non-NULL characters in above
+}
+
+// CFString32Type is the 32-bit constant CFString on-disk layout.
+type CFString32Type struct {
+	IsaVMAddr uint32
+	Info      uint32
+	Data      uint32
+	Length    uint32
 }
 
 // CFString encoding constants (derived from Info field)
@@ -447,6 +450,14 @@ type IvarT struct {
 	Offset       uint64 // uint32_t*  (uint64_t* on x86_64)
 	NameVMAddr   uint64 // const char*
 	TypesVMAddr  uint64 // const char*
+	AlignmentRaw uint32
+	Size         uint32
+}
+
+type IvarT32 struct {
+	Offset       uint32 // uint32_t *
+	NameVMAddr   uint32 // const char *
+	TypesVMAddr  uint32 // const char *
 	AlignmentRaw uint32
 	Size         uint32
 }

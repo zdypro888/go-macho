@@ -14,6 +14,19 @@ type CategoryT struct {
 	ClassMethodsVMAddr       uint64
 	ProtocolsVMAddr          uint64
 	InstancePropertiesVMAddr uint64
+	ClassPropertiesVMAddr    uint64
+}
+
+// CategoryT32 is the 32-bit on-disk category_t layout. Parsers normalize it
+// into CategoryT so public addresses remain uint64 regardless of target ABI.
+type CategoryT32 struct {
+	NameVMAddr               uint32
+	ClsVMAddr                uint32
+	InstanceMethodsVMAddr    uint32
+	ClassMethodsVMAddr       uint32
+	ProtocolsVMAddr          uint32
+	InstancePropertiesVMAddr uint32
+	ClassPropertiesVMAddr    uint32
 }
 
 // Category represents an Objective-C category.
@@ -25,6 +38,7 @@ type Category struct {
 	ClassMethods    []Method
 	InstanceMethods []Method
 	Properties      []Property
+	ClassProperties []Property
 	CategoryT
 }
 
@@ -43,7 +57,7 @@ func (c *Category) dump(verbose, addrs bool) string {
 
 	var className string
 	if c.Class != nil {
-		className = c.Class.Name + " "
+		className = c.Class.Name
 	}
 
 	var cat string
@@ -82,7 +96,7 @@ func (c *Category) dump(verbose, addrs bool) string {
 				}
 				s.WriteString(fmt.Sprintf("+ %s\n", getMethodWithArgs(meth.Name, rtype, args)))
 			} else {
-				s.WriteString(fmt.Sprintf("-[%s %s];\n", c.Name, meth.Name))
+				s.WriteString(fmt.Sprintf("+[%s %s];\n", className, meth.Name))
 			}
 		}
 		cMethods = s.String()
@@ -107,7 +121,7 @@ func (c *Category) dump(verbose, addrs bool) string {
 				}
 				s.WriteString(fmt.Sprintf("- %s\n", getMethodWithArgs(meth.Name, rtype, args)))
 			} else {
-				s.WriteString(fmt.Sprintf("-[%s %s];\n", c.Name, meth.Name))
+				s.WriteString(fmt.Sprintf("-[%s %s];\n", className, meth.Name))
 			}
 		}
 		iMethods = s.String()

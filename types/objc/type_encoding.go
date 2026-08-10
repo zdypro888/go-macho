@@ -173,7 +173,7 @@ func getMethodWithArgs(method, returnType string, args []string) string {
 
 	parts := strings.Split(method, ":")
 
-	var methodStr string
+	var methodStr strings.Builder
 	if len(parts) > 1 { // method has arguments based on SEL having ':'
 		for idx, part := range parts {
 			argName := getLastCapitalizedPart(part)
@@ -183,9 +183,9 @@ func getMethodWithArgs(method, returnType string, args []string) string {
 			if len(part) == 0 || idx >= len(args) {
 				break
 			}
-			methodStr += fmt.Sprintf("%s:%s ", part, args[idx]+argName)
+			methodStr.WriteString(fmt.Sprintf("%s:%s ", part, args[idx]+argName))
 		}
-		return fmt.Sprintf("(%s)%s;", returnType, strings.TrimSpace(methodStr))
+		return fmt.Sprintf("(%s)%s;", returnType, strings.TrimSpace(methodStr.String()))
 	}
 	// method has no arguments based on SEL not having ':'
 	return fmt.Sprintf("(%s)%s;", returnType, method)
@@ -460,12 +460,40 @@ func decodeVector(vectorType string) string {
 
 func decodeBitfield(bitfield string) string {
 	span := encodingGetSizeOfArguments(bitfield)
-	return fmt.Sprintf("unsigned int x:%d", span)
+	return formatBitfieldDecl("x", span)
+}
+
+const (
+	bitfieldWidthUnsignedInt      uint = 32
+	bitfieldWidthUnsignedLongLong uint = 64
+	bitfieldWidthUnsignedInt128   uint = 128
+)
+
+func bitfieldTypeForSpan(span uint) (string, uint) {
+	switch {
+	case span <= bitfieldWidthUnsignedInt:
+		return "unsigned int", span
+	case span <= bitfieldWidthUnsignedLongLong:
+		return "unsigned long long", span
+	case span <= bitfieldWidthUnsignedInt128:
+		return "unsigned __int128", span
+	default:
+		return "unsigned __int128", bitfieldWidthUnsignedInt128
+	}
+}
+
+func formatBitfieldDecl(name string, span uint) string {
+	typ, effectiveSpan := bitfieldTypeForSpan(span)
+	decl := fmt.Sprintf("%s %s:%d", typ, name, effectiveSpan)
+	if effectiveSpan != span {
+		decl += fmt.Sprintf(" /* unsupported bitfield width %d */", span)
+	}
+	return decl
 }
 
 func getFieldName(field string) (string, string) {
-	if strings.HasPrefix(field, "\"") {
-		name, rest, ok := strings.Cut(strings.TrimPrefix(field, "\""), "\"")
+	if after, ok := strings.CutPrefix(field, "\""); ok {
+		name, rest, ok := strings.Cut(after, "\"")
 		if !ok {
 			return "", field
 		}
@@ -516,7 +544,7 @@ func decodeStructOrUnion(typ, kind string) string {
 
 		if strings.HasPrefix(field, "b") {
 			span := encodingGetSizeOfArguments(field)
-			fields = append(fields, fmt.Sprintf("unsigned int %s:%d;", fieldName, span))
+			fields = append(fields, formatBitfieldDecl(fieldName, span)+";")
 		} else if strings.HasPrefix(field, "[") {
 			array := decodeType(field)
 			array = strings.TrimSpace(strings.Replace(array, "x", fieldName, 1)) + ";"
@@ -724,44 +752,58 @@ func CutType(typStr string) (string, string, bool) {
 				i++ /* Blocks */
 			} else if i+1 < len(typ) && typ[i+1] == '"' {
 				i++
-				for typ[i+1] != '"' {
+				for i+1 < len(typ) && typ[i+1] != '"' {
 					i++ /* Class */
 				}
 				i++
 			}
-			return string(typ[:i+1]), string(typ[i+1:]), true
+			return cutAt(typ, i+1)
 		case 'b': /* bitfields */
 			i++
 			for i < len(typ) && typ[i] >= '0' && typ[i] <= '9' {
 				i++
 			}
-			return string(typ[:i]), string(typ[i:]), true
+			return cutAt(typ, i)
 		case '!': /* vectors */
 			i += 2
-			for typ[i] == ',' || typ[i] >= '0' && typ[i] <= '9' {
+			if i > len(typ) {
+				i = len(typ)
+			}
+			for i < len(typ) && (typ[i] == ',' || typ[i] >= '0' && typ[i] <= '9') {
 				i++
 			}
-			return string(typ[:i+subtypeUntil(string(typ[i:]), ']')+1]), string(typ[i+subtypeUntil(string(typ[i:]), ']')+1:]), true
+			return cutAt(typ, i+subtypeUntil(string(typ[i:]), ']')+1)
 		case '[': /* arrays */
 			i++
-			for typ[i] >= '0' && typ[i] <= '9' {
+			for i < len(typ) && typ[i] >= '0' && typ[i] <= '9' {
 				i++
 			}
-			return string(typ[:i+subtypeUntil(string(typ[i:]), ']')+1]), string(typ[i+subtypeUntil(string(typ[i:]), ']')+1:]), true
+			return cutAt(typ, i+subtypeUntil(string(typ[i:]), ']')+1)
 		case '{': /* structures */
 			i++
-			return string(typ[:i+subtypeUntil(string(typ[i:]), '}')+1]), string(typ[i+subtypeUntil(string(typ[i:]), '}')+1:]), true
+			return cutAt(typ, i+subtypeUntil(string(typ[i:]), '}')+1)
 		case '(': /* unions */
 			i++
-			return string(typ[:i+subtypeUntil(string(typ[i:]), ')')+1]), string(typ[i+subtypeUntil(string(typ[i:]), ')')+1:]), true
+			return cutAt(typ, i+subtypeUntil(string(typ[i:]), ')')+1)
 		case '<': /* block func prototype */
 			i++
-			return string(typ[:i+subtypeUntil(string(typ[i:]), '>')+1]), string(typ[i+subtypeUntil(string(typ[i:]), '>')+1:]), true
+			return cutAt(typ, i+subtypeUntil(string(typ[i:]), '>')+1)
 		default: /* basic types */
 			i++
-			return string(typ[:i]), string(typ[i:]), true
+			return cutAt(typ, i)
 		}
 	}
+}
+
+// cutAt splits typ into the head token typ[:end] and the remainder typ[end:],
+// clamping end to len(typ) so a malformed or truncated type encoding (e.g. an
+// unterminated "{", "(", "<", or "@\"" with no closing delimiter) can never
+// drive an out-of-range slice. It always reports ok=true.
+func cutAt(typ []byte, end int) (string, string, bool) {
+	if end > len(typ) {
+		end = len(typ)
+	}
+	return string(typ[:end]), string(typ[end:]), true
 }
 
 func getNumberOfArguments(types string) int {
