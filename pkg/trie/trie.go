@@ -2,7 +2,6 @@ package trie
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -45,7 +44,7 @@ func ReadUleb128(r *bytes.Reader) (uint64, error) {
 	var result uint64
 	var shift uint64
 
-	for {
+	for byteIndex := 0; ; byteIndex++ {
 		b, err := r.ReadByte()
 		if err == io.EOF {
 			return 0, err
@@ -54,7 +53,13 @@ func ReadUleb128(r *bytes.Reader) (uint64, error) {
 			return 0, fmt.Errorf("could not parse ULEB128 value: %v", err)
 		}
 
-		result |= uint64((uint(b) & 0x7f) << shift)
+		if byteIndex == 9 && b > 1 {
+			return 0, fmt.Errorf("ULEB128 value overflows uint64")
+		}
+		if byteIndex >= 10 {
+			return 0, fmt.Errorf("ULEB128 value exceeds 10 bytes")
+		}
+		result |= uint64(b&0x7f) << shift
 
 		// If high order bit is 1.
 		if (b & 0x80) == 0 {
@@ -166,62 +171,51 @@ func EncodeSleb128(out io.ByteWriter, x int64) {
 }
 
 func ReadExport(r *bytes.Reader, symbol string, loadAddress uint64) (*TrieExport, error) {
-	var symFlagInt, symValueInt, symOtherInt uint64
-	var reExportSymBytes []byte
-	var reExportSymName string
-
 	symFlagInt, err := ReadUleb128(r)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse ULEB128 symbol flag value: %v", err)
 	}
 
 	flags := types.ExportFlag(symFlagInt)
+	export := &TrieExport{Name: symbol, Flags: flags}
 
 	if flags.ReExport() {
-		symOtherInt, err = ReadUleb128(r)
+		export.Other, err = ReadUleb128(r)
 		if err != nil {
-			return nil, fmt.Errorf("could not parse ULEB128 symbol other reexport value: %v", err)
+			return nil, fmt.Errorf("could not parse ULEB128 re-export dylib ordinal: %v", err)
 		}
-
+		var name []byte
 		for {
 			s, err := r.ReadByte()
-			if err == io.EOF {
-				break
+			if err != nil {
+				return nil, fmt.Errorf("could not parse re-export import name: %w", err)
 			}
 			if s == '\x00' {
 				break
 			}
-			reExportSymBytes = append(reExportSymBytes, s)
+			name = append(name, s)
 		}
-
-	} else if flags.StubAndResolver() {
-		symOtherInt, err = ReadUleb128(r)
-		if err != nil {
-			return nil, fmt.Errorf("could not parse ULEB128 symbol other stub-n-resolver value: %v", err)
-		}
-		symOtherInt += loadAddress
+		export.ReExport = string(name)
+		return export, nil
 	}
 
-	symValueInt, err = ReadUleb128(r)
+	export.Address, err = ReadUleb128(r)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse ULEB128 symbol value: %v", err)
 	}
-
-	if (flags.Regular() || flags.ThreadLocal()) && !flags.ReExport() {
-		symValueInt += loadAddress
+	if flags.Regular() || flags.ThreadLocal() {
+		export.Address += loadAddress
 	}
 
-	if len(reExportSymBytes) > 0 {
-		reExportSymName = string(reExportSymBytes)
+	if flags.StubAndResolver() {
+		export.Other, err = ReadUleb128(r)
+		if err != nil {
+			return nil, fmt.Errorf("could not parse ULEB128 resolver value: %v", err)
+		}
+		export.Other += loadAddress
 	}
 
-	return &TrieExport{
-		Name:     symbol,
-		ReExport: reExportSymName,
-		Flags:    flags,
-		Other:    symOtherInt,
-		Address:  symValueInt,
-	}, nil
+	return export, nil
 }
 
 func ParseTrieExports(r *bytes.Reader, loadAddress uint64) ([]TrieExport, error) {
@@ -248,32 +242,48 @@ func ParseTrieExports(r *bytes.Reader, loadAddress uint64) ([]TrieExport, error)
 
 func ParseTrie(r *bytes.Reader) ([]Node, error) {
 	data := make([]byte, 0, 32768)
-	return parseTrie(r, 0, data)
+	return parseTrie(r, 0, data, make(map[uint64]bool))
 }
 
-func parseTrie(r *bytes.Reader, pos uint64, cummulativeString []byte) ([]Node, error) {
+func parseTrie(r *bytes.Reader, pos uint64, cummulativeString []byte, ancestors map[uint64]bool) ([]Node, error) {
 
 	var output []Node
+	if pos >= uint64(r.Size()) {
+		return nil, fmt.Errorf("trie node offset %#x exceeds size %#x", pos, r.Size())
+	}
+	if ancestors[pos] {
+		return nil, fmt.Errorf("trie child offset %#x forms a cycle", pos)
+	}
+	ancestors[pos] = true
+	defer delete(ancestors, pos)
 
-	r.Seek(int64(pos), io.SeekStart)
+	if _, err := r.Seek(int64(pos), io.SeekStart); err != nil {
+		return nil, fmt.Errorf("could not seek to trie node %#x: %v", pos, err)
+	}
 
 	terminalSize, err := ReadUleb128(r)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse ULEB128 terminalSize value: %v", err)
 	}
 
+	terminalOffset, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, fmt.Errorf("could not get terminal offset: %v", err)
+	}
+	if terminalSize > uint64(r.Size()-terminalOffset) {
+		return nil, fmt.Errorf("terminal payload at %#x has size %#x beyond trie size %#x", terminalOffset, terminalSize, r.Size())
+	}
 	if terminalSize != 0 {
-		off, err := r.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return nil, fmt.Errorf("could not get current offset: %v", err)
-		}
 		output = append(output, Node{
-			Offset: uint64(off),
+			Offset: uint64(terminalOffset),
 			Data:   append([]byte{}, cummulativeString...),
 		})
 	}
 
-	r.Seek(int64(pos+terminalSize+1), io.SeekStart)
+	childrenOffset := uint64(terminalOffset) + terminalSize
+	if _, err := r.Seek(int64(childrenOffset), io.SeekStart); err != nil {
+		return nil, fmt.Errorf("could not seek to trie children at %#x: %v", childrenOffset, err)
+	}
 
 	childrenRemaining, err := r.ReadByte()
 	if err != nil {
@@ -284,8 +294,8 @@ func parseTrie(r *bytes.Reader, pos uint64, cummulativeString []byte) ([]Node, e
 		tmp := make([]byte, 0, 100)
 		for {
 			s, err := r.ReadByte()
-			if err == io.EOF {
-				break
+			if err != nil {
+				return nil, fmt.Errorf("could not read child %d edge: %w", i, err)
 			}
 			if s == '\x00' {
 				break
@@ -300,7 +310,7 @@ func parseTrie(r *bytes.Reader, pos uint64, cummulativeString []byte) ([]Node, e
 
 		curr, _ := r.Seek(0, io.SeekCurrent)
 
-		nodes, err := parseTrie(r, childNodeOffset, append(cummulativeString, tmp...))
+		nodes, err := parseTrie(r, childNodeOffset, append(cummulativeString, tmp...), ancestors)
 		if err != nil {
 			return nil, fmt.Errorf("could not parse trie (recursive call): %v", err)
 		}
@@ -319,31 +329,33 @@ func WalkTrie(r *bytes.Reader, symbol string) (uint64, error) {
 	var offset, nodeOffset uint64
 
 	for {
-		r.Seek(int64(offset), io.SeekStart)
+		if offset >= uint64(r.Size()) {
+			return 0, fmt.Errorf("trie node offset %#x exceeds size %#x", offset, r.Size())
+		}
+		if _, err := r.Seek(int64(offset), io.SeekStart); err != nil {
+			return 0, fmt.Errorf("failed to seek to trie node %#x: %v", offset, err)
+		}
 
-		terminalSize, err := binary.ReadUvarint(r)
+		terminalSize, err := ReadUleb128(r)
 		if err != nil {
 			return 0, fmt.Errorf("failed to read terminalSize value: %v", err)
 		}
-
-		r.Seek(int64(offset+1), io.SeekStart)
-
-		if terminalSize > 127 {
-			r.Seek(int64(offset), io.SeekStart)
-
-			terminalSize, err = ReadUleb128(r)
-			if err != nil {
-				return 0, fmt.Errorf("could not parse ULEB128 terminalSize value: %v", err)
-			}
+		terminalOffset, err := r.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, fmt.Errorf("failed to get terminal payload offset: %v", err)
+		}
+		if terminalSize > uint64(r.Size()-terminalOffset) {
+			return 0, fmt.Errorf("terminal payload at %#x has size %#x beyond trie size %#x", terminalOffset, terminalSize, r.Size())
 		}
 
 		if int(strIndex) == len(symbol) && (terminalSize != 0) {
-			// skip over zero terminator
-			r.Seek(int64(offset+1), io.SeekStart)
-			return offset + 1, nil
+			return uint64(terminalOffset), nil
 		}
 
-		r.Seek(int64(offset+terminalSize+1), io.SeekStart)
+		childrenOffset := uint64(terminalOffset) + terminalSize
+		if _, err := r.Seek(int64(childrenOffset), io.SeekStart); err != nil {
+			return 0, fmt.Errorf("failed to seek to trie children at %#x: %v", childrenOffset, err)
+		}
 
 		childrenRemaining, err := r.ReadByte()
 		if err == io.EOF {
