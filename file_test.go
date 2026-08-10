@@ -35,11 +35,11 @@ var fileTests = []fileTest{
 		"internal/testdata/gcc-386-darwin-exec.base64",
 		types.FileHeader{Magic: 0xfeedface, CPU: types.CPUI386, SubCPU: 0x3, Type: 0x2, NCommands: 0xc, SizeCommands: 0x3c0, Flags: 0x85, Reserved: 0x1},
 		[]any{
-			&SegmentHeader{types.LC_SEGMENT, 0x38, "__PAGEZERO", 0x0, 0x1000, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
-			&SegmentHeader{types.LC_SEGMENT, 0xc0, "__TEXT", 0x1000, 0x1000, 0x0, 0x1000, 0x7, 0x5, 0x2, 0x0, 0},
-			&SegmentHeader{types.LC_SEGMENT, 0xc0, "__DATA", 0x2000, 0x1000, 0x1000, 0x1000, 0x7, 0x3, 0x2, 0x0, 0x2},
-			&SegmentHeader{types.LC_SEGMENT, 0x7c, "__IMPORT", 0x3000, 0x1000, 0x2000, 0x1000, 0x7, 0x7, 0x1, 0x0, 0x4},
-			&SegmentHeader{types.LC_SEGMENT, 0x38, "__LINKEDIT", 0x4000, 0x1000, 0x3000, 0x12c, 0x7, 0x1, 0x0, 0x0, 0x5},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT, Len: 0x38, Name: "__PAGEZERO", Addr: 0x0, Memsz: 0x1000, Offset: 0x0, Filesz: 0x0, Maxprot: 0x0, Prot: 0x0, Nsect: 0x0, Flag: 0x0, Firstsect: 0x0},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT, Len: 0xc0, Name: "__TEXT", Addr: 0x1000, Memsz: 0x1000, Offset: 0x0, Filesz: 0x1000, Maxprot: 0x7, Prot: 0x5, Nsect: 0x2, Flag: 0x0, Firstsect: 0x0},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT, Len: 0xc0, Name: "__DATA", Addr: 0x2000, Memsz: 0x1000, Offset: 0x1000, Filesz: 0x1000, Maxprot: 0x7, Prot: 0x3, Nsect: 0x2, Flag: 0x0, Firstsect: 0x2},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT, Len: 0x7c, Name: "__IMPORT", Addr: 0x3000, Memsz: 0x1000, Offset: 0x2000, Filesz: 0x1000, Maxprot: 0x7, Prot: 0x7, Nsect: 0x1, Flag: 0x0, Firstsect: 0x4},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT, Len: 0x38, Name: "__LINKEDIT", Addr: 0x4000, Memsz: 0x1000, Offset: 0x3000, Filesz: 0x12c, Maxprot: 0x7, Prot: 0x1, Nsect: 0x0, Flag: 0x0, Firstsect: 0x5},
 			nil, // LC_SYMTAB
 			nil, // LC_DYSYMTAB
 			nil, // LC_LOAD_DYLINKER
@@ -61,8 +61,8 @@ var fileTests = []fileTest{
 		"internal/testdata/gcc-amd64-darwin-exec.base64",
 		types.FileHeader{Magic: 0xfeedfacf, CPU: types.CPUAmd64, SubCPU: 0x80000003, Type: 0x2, NCommands: 0xb, SizeCommands: 0x568, Flags: 0x85, Reserved: 0x0},
 		[]any{
-			&SegmentHeader{types.LC_SEGMENT_64, 0x48, "__PAGEZERO", 0x0, 0x100000000, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
-			&SegmentHeader{types.LC_SEGMENT_64, 0x1d8, "__TEXT", 0x100000000, 0x1000, 0x0, 0x1000, 0x7, 0x5, 0x5, 0x0, 0},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT_64, Len: 0x48, Name: "__PAGEZERO", Addr: 0x0, Memsz: 0x100000000, Offset: 0x0, Filesz: 0x0, Maxprot: 0x0, Prot: 0x0, Nsect: 0x0, Flag: 0x0, Firstsect: 0x0},
+			&SegmentHeader{LoadCmd: types.LC_SEGMENT_64, Len: 0x1d8, Name: "__TEXT", Addr: 0x100000000, Memsz: 0x1000, Offset: 0x0, Filesz: 0x1000, Maxprot: 0x7, Prot: 0x5, Nsect: 0x5, Flag: 0x0, Firstsect: 0x0},
 			&SegmentHeader{LoadCmd: 0x19, Len: 0x138, Name: "__DATA", Addr: 0x100001000, Memsz: 0x1000, Offset: 0x1000, Filesz: 0x1000, Maxprot: 7, Prot: 3, Nsect: 0x3, Flag: 0x0, Firstsect: 0x5},
 			&SegmentHeader{LoadCmd: 0x19, Len: 0x48, Name: "__LINKEDIT", Addr: 0x100002000, Memsz: 0x1000, Offset: 0x2000, Filesz: 0x140, Maxprot: 7, Prot: 1, Nsect: 0x0, Flag: 0x0, Firstsect: 0x8},
 			nil, // LC_SYMTAB
@@ -833,7 +833,7 @@ func TestNewFileWithObjC(t *testing.T) {
 			}
 		} else {
 			if !errors.Is(err, ErrObjcSectionNotFound) {
-				t.Fatalf(err.Error())
+				t.Fatal(err)
 			}
 		}
 
@@ -845,7 +845,7 @@ func TestNewFileWithObjC(t *testing.T) {
 			}
 		} else {
 			if !errors.Is(err, ErrObjcSectionNotFound) {
-				t.Fatalf(err.Error())
+				t.Fatal(err)
 			}
 		}
 
@@ -855,7 +855,7 @@ func TestNewFileWithObjC(t *testing.T) {
 			}
 		} else {
 			if !errors.Is(err, ErrObjcSectionNotFound) {
-				t.Fatalf(err.Error())
+				t.Fatal(err)
 			}
 		}
 
@@ -865,7 +865,7 @@ func TestNewFileWithObjC(t *testing.T) {
 			}
 		} else {
 			if !errors.Is(err, ErrObjcSectionNotFound) {
-				t.Fatalf(err.Error())
+				t.Fatal(err)
 			}
 		}
 
@@ -874,7 +874,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Println(class.String())
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 
 		if cats, err := got.GetObjCCategories(); err == nil {
@@ -882,7 +882,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Println(cat.String())
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 
 		if nlcats, err := got.GetObjCNonLazyCategories(); err == nil {
@@ -890,7 +890,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Println(cat.String())
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 
 		if selRefs, err := got.GetObjCProtoReferences(); err == nil {
@@ -899,7 +899,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Printf("%#x -> %#x: %s\n", off, prot.Ptr, prot.Name)
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		if selRefs, err := got.GetObjCClassReferences(); err == nil {
 			fmt.Println("@class refs")
@@ -907,7 +907,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Printf("%#x -> %#x: %s\n", off, sel.ClassPtr, sel.Name)
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		if selRefs, err := got.GetObjCSuperReferences(); err == nil {
 			fmt.Println("@super refs")
@@ -915,7 +915,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Printf("%#x -> %#x: %s\n", off, sel.ClassPtr, sel.SuperClass)
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		if selRefs, err := got.GetObjCSelectorReferences(); err == nil {
 			fmt.Println("@selectors refs")
@@ -923,7 +923,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Printf("%#x -> %#x: %s\n", off, sel.VMAddr, sel.Name)
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 		if methods, err := got.GetObjCMethodNames(); err == nil {
 			fmt.Printf("\n@methods\n")
@@ -931,7 +931,7 @@ func TestNewFileWithObjC(t *testing.T) {
 				fmt.Printf("%#x: %s\n", vmaddr, method)
 			}
 		} else {
-			t.Fatalf(err.Error())
+			t.Fatal(err)
 		}
 	}
 }
