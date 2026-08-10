@@ -18,7 +18,8 @@ var _NecessaryBindingsKind_index = [...]uint8{0, 12, 25}
 
 func (i NecessaryBindingsKind) String() string {
 	if i >= NecessaryBindingsKind(len(_NecessaryBindingsKind_index)-1) {
-		return "NecessaryBindingsKind(" + strconv.FormatInt(int64(i), 10) + ")"
+		return "NecessaryBindingsKind(" + strconv.FormatUint(uint64(i), 10) + ")"
 	}
-	return _NecessaryBindingsKind_name[_NecessaryBindingsKind_index[i]:_NecessaryBindingsKind_index[i+1]]
+	idx := int(i)
+	return _NecessaryBindingsKind_name[_NecessaryBindingsKind_index[idx]:_NecessaryBindingsKind_index[idx+1]]
 }
