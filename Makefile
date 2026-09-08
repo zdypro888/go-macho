@@ -1,11 +1,11 @@
 REPO=blacktop
 NAME=go-macho
-NEXT_VERSION:=$(shell svu patch)
+NEXT_VERSION=$(shell svu patch)
 
 .PHONY: dev-deps
 dev-deps: ## Install the dev dependencies
-	@go install github.com/caarlos0/svu@v1.12.0
-	@go install golang.org/x/tools/cmd/goimports@v0.45.0
+	@go install github.com/caarlos0/svu/v3@v3.4.1
+	@go install golang.org/x/tools/cmd/goimports@v0.49.0
 
 .PHONY: bump
 bump: ## Tag and push the next patch version

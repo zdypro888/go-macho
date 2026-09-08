@@ -128,7 +128,9 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 				switch prop.Key {
 				case "$and-array":
 					var andArray []asn1.RawValue
-					data, err = asn1.Unmarshal(prop.Val.FullBytes, &andArray)
+					// Keep the outer sibling cursor. Previously each nested
+					// decode replaced data with its (usually empty) remainder.
+					_, err = asn1.Unmarshal(prop.Val.FullBytes, &andArray)
 					if err != nil {
 						return nil, fmt.Errorf("failed to ASN.1 parse launch contraint '$and-array' properties: %v", err)
 					}
@@ -142,7 +144,7 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 					}
 				case "$or-array":
 					var orArray []asn1.RawValue
-					data, err = asn1.Unmarshal(prop.Val.FullBytes, &orArray)
+					_, err = asn1.Unmarshal(prop.Val.FullBytes, &orArray)
 					if err != nil {
 						return nil, fmt.Errorf("failed to ASN.1 parse launch contraint '$or-array' properties: %v", err)
 					}
@@ -156,7 +158,7 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 					}
 				case "$query":
 					var query []Entitlement
-					data, err = asn1.Unmarshal(prop.Val.FullBytes, &query)
+					_, err = asn1.Unmarshal(prop.Val.FullBytes, &query)
 					if err != nil {
 						return nil, fmt.Errorf("failed to ASN.1 parse launch contraint '$query' properties: %v", err)
 					}
@@ -170,7 +172,7 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 					}
 				case "$in":
 					var ins []asn1.RawValue
-					data, err = asn1.Unmarshal(prop.Val.FullBytes, &ins)
+					_, err = asn1.Unmarshal(prop.Val.FullBytes, &ins)
 					if err != nil {
 						return nil, fmt.Errorf("failed to ASN.1 parse launch contraint '$in' properties: %v", err)
 					}
@@ -207,7 +209,7 @@ func ParseLaunchContraints(data []byte) (*LaunchContraints, error) {
 	}
 
 	var l launchContraints
-	data, err = asn1.UnmarshalWithParams(data, &l, typeAppl)
+	_, err = asn1.UnmarshalWithParams(data, &l, typeAppl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ASN.1 parse launch contraint inner data: %v", err)
 	}

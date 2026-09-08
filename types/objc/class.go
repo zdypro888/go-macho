@@ -168,7 +168,7 @@ func (c *Class) dump(verbose, addrs bool) string {
 		class += fmt.Sprintf(" <%s>", strings.Join(subProts, ", "))
 	}
 	if len(c.Ivars) > 0 {
-		class += fmt.Sprintf(" {")
+		class += " {"
 	}
 	if verbose {
 		var comment string

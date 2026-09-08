@@ -203,7 +203,7 @@ func (f FieldRecordFlags) IsArtificial() bool {
 	return (f & IsArtificial) == IsArtificial
 }
 
-func (f FieldRecordFlags) String() string { // TODO: this is dumb (does ind or anon ever happen?)
+func (f FieldRecordFlags) String() string {
 	var out string
 	if f.IsIndirectCase() {
 		out = "indirect case"
@@ -215,9 +215,16 @@ func (f FieldRecordFlags) String() string { // TODO: this is dumb (does ind or a
 		out += "artificial"
 	}
 	if f.IsVar() {
-		out = "var"
+		if len(out) > 0 {
+			out += " | "
+		}
+		out += "var"
 	} else {
-		out = "let"
+		if len(out) > 0 {
+			out += " | "
+		}
+		// Previously this assignment erased the indirect/artificial flags.
+		out += "let"
 	}
 	return out
 }
