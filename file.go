@@ -471,6 +471,11 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 				if err := binary.Read(b, bo, &thread.Count); err != nil {
 					return nil, fmt.Errorf("failed to read LC_THREAD count: %v", err)
 				}
+				// NOTE: the uint32 multiplication (and its wrap-around) is kept as is;
+				// only a size that cannot be satisfied by the load command is rejected early.
+				if err := checkReadCount(b, uint64(thread.Count*uint32(binary.Size(uint32(0)))), 1); err != nil {
+					return nil, fmt.Errorf("failed to read LC_THREAD state struct data: %v", err)
+				}
 				thread.Data = make([]byte, thread.Count*uint32(binary.Size(uint32(0))))
 				if err := binary.Read(b, bo, &thread.Data); err != nil {
 					return nil, fmt.Errorf("failed to read LC_THREAD state struct data: %v", err)
@@ -503,6 +508,11 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 				}
 				if err := binary.Read(b, bo, &thread.Count); err != nil {
 					return nil, fmt.Errorf("failed to read LC_UNIXTHREAD count: %v", err)
+				}
+				// NOTE: the uint32 multiplication (and its wrap-around) is kept as is;
+				// only a size that cannot be satisfied by the load command is rejected early.
+				if err := checkReadCount(b, uint64(thread.Count*uint32(binary.Size(uint32(0)))), 1); err != nil {
+					return nil, fmt.Errorf("failed to read LC_UNIXTHREAD state struct data: %v", err)
 				}
 				thread.Data = make([]byte, thread.Count*uint32(binary.Size(uint32(0))))
 				if err := binary.Read(b, bo, &thread.Data); err != nil {
@@ -835,6 +845,9 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			l.LoadCmd = cmd
 			l.Len = siz
 			l.Offset = t.Offset
+			if err := checkReadCount(b, uint64(t.NumHints), uint64(binary.Size(types.TwolevelHint(0)))); err != nil {
+				return nil, fmt.Errorf("failed to read hints data: %v", err)
+			}
 			l.Hints = make([]types.TwolevelHint, t.NumHints)
 			if err := binary.Read(b, bo, &l.Hints); err != nil {
 				return nil, fmt.Errorf("failed to read hints data: %v", err)
@@ -930,8 +943,8 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			l.Len = siz
 			l.Offset = hdr.Offset
 			l.Size = hdr.Size
-			csdat := make([]byte, hdr.Size)
-			if _, err := f.cr.ReadAt(csdat, int64(hdr.Offset)); err != nil {
+			csdat, err := readDataAt(f.cr, uint64(hdr.Size), int64(hdr.Offset))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read CS data at offset=%#x; %v", int64(hdr.Offset), err)
 			}
 			cs, err := codesign.ParseCodeSignature(csdat)
@@ -953,8 +966,8 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			l.Offset = hdr.Offset
 			l.Size = hdr.Size
 			if l.Size > 0 {
-				ldat := make([]byte, l.Size)
-				if _, err := f.cr.ReadAt(ldat, int64(l.Offset)); err != nil {
+				ldat, err := readDataAt(f.cr, uint64(l.Size), int64(l.Offset))
+				if err != nil {
 					return nil, fmt.Errorf("failed to read SplitInfo data at offset=%#x; %v", int64(hdr.Offset), err)
 				}
 				fsr := bytes.NewReader(ldat)
@@ -1160,8 +1173,8 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			l.Len = siz
 			l.Offset = led.Offset
 			l.Size = led.Size
-			ldat := make([]byte, l.Size)
-			if _, err := f.cr.ReadAt(ldat, int64(l.Offset)); err != nil {
+			ldat, err := readDataAt(f.cr, uint64(l.Size), int64(l.Offset))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read DataInCode data at offset=%#x; %v", int64(led.Offset), err)
 			}
 			l.Entries = make([]types.DataInCodeEntry, len(ldat)/binary.Size(types.DataInCodeEntry{}))
@@ -1281,8 +1294,8 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			l.Offset = n.Offset
 			l.Size = n.Size
 			l.bo = bo
-			l.Data = make([]byte, l.Size)
-			if _, err := f.cr.ReadAt(l.Data, int64(l.Offset)); err != nil {
+			var err error
+			if l.Data, err = readDataAt(f.cr, uint64(l.Size), int64(l.Offset)); err != nil {
 				return nil, fmt.Errorf("failed to read Note data at offset=%#x; %v", int64(l.Offset), err)
 			}
 			f.Loads = append(f.Loads, l)
@@ -2547,8 +2560,8 @@ func (f *File) GetCStrings() (map[string]map[string]uint64, error) {
 	for _, sec := range f.Sections {
 		if sec.Flags.IsCstringLiterals() || sec.Name == "__os_log" {
 			// Thread-safe: Use ReadAtAddr which doesn't modify shared state
-			dat := make([]byte, sec.Size)
-			if _, err := f.cr.ReadAtAddr(dat, sec.Addr); err != nil {
+			dat, err := readDataAtAddr(f.cr, sec.Size, sec.Addr)
+			if err != nil {
 				return nil, fmt.Errorf("failed to read cstring data in %s.%s: %w", sec.Seg, sec.Name, err)
 			}
 
@@ -3363,8 +3376,8 @@ func (f *File) GetFunctions(data ...byte) []types.Function {
 	if len(data) > 0 {
 		fsr = bytes.NewReader(data)
 	} else {
-		ldat := make([]byte, fs.Size)
-		if _, err := f.cr.ReadAt(ldat, int64(fs.Offset)); err != nil {
+		ldat, err := readDataAt(f.cr, uint64(fs.Size), int64(fs.Offset))
+		if err != nil {
 			return nil
 		}
 		fsr = bytes.NewReader(ldat)
@@ -3863,12 +3876,18 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 
 		if len(b) >= 12 && string(b[:4]) == "ZLIB" {
 			dlen := binary.BigEndian.Uint64(b[4:12])
-			dbuf := make([]byte, dlen)
 			r, err := zlib.NewReader(bytes.NewBuffer(b[12:]))
 			if err != nil {
 				return nil, err
 			}
-			if _, err := io.ReadFull(r, dbuf); err != nil {
+			// dlen is untrusted: only allocate what the stream really inflates to.
+			var dbuf []byte
+			if dlen < safeAllocChunk {
+				dbuf = make([]byte, dlen)
+				if _, err := io.ReadFull(r, dbuf); err != nil {
+					return nil, err
+				}
+			} else if dbuf, err = saferio.ReadData(r, dlen); err != nil {
 				return nil, err
 			}
 			if err := r.Close(); err != nil {

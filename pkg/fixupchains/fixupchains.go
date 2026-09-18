@@ -110,6 +110,10 @@ func (dcf *DyldChainedFixups) parseStartsLocked() error {
 	if dcf.metadataParsed {
 		return nil
 	}
+	if dcf.r == nil {
+		// e.g. a zero DyldChainedFixups{} used only for its PointerFormat
+		return fmt.Errorf("chained-fixups payload reader is nil")
+	}
 
 	if _, err := dcf.r.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to chained-fixups header: %w", err)

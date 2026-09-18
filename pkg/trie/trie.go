@@ -328,7 +328,27 @@ func WalkTrie(r *bytes.Reader, symbol string) (uint64, error) {
 	var strIndex int
 	var offset, nodeOffset uint64
 
+	// The walk is deterministic in (offset, strIndex) and strIndex never
+	// decreases, so reaching the same node again without having consumed any
+	// symbol character (a chain of empty-label edges pointing back) means the
+	// loop would never terminate. Detect exactly that with Brent's algorithm
+	// (no allocation, no effect on any walk that terminates).
+	cycleIndex := -1
+	var cycleAnchor uint64
+	var cycleSteps, cyclePower int
+
 	for {
+		if strIndex != cycleIndex {
+			cycleIndex, cycleAnchor, cycleSteps, cyclePower = strIndex, offset, 0, 1
+		} else {
+			if offset == cycleAnchor {
+				return 0, fmt.Errorf("trie node offset %#x forms a cycle", offset)
+			}
+			if cycleSteps++; cycleSteps == cyclePower {
+				cycleAnchor, cycleSteps, cyclePower = offset, 0, cyclePower*2
+			}
+		}
+
 		if offset >= uint64(r.Size()) {
 			return 0, fmt.Errorf("trie node offset %#x exceeds size %#x", offset, r.Size())
 		}

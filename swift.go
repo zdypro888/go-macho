@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -73,8 +73,8 @@ func (f *File) GetSwiftEntry() (uint64, error) {
 		}
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return 0, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -94,8 +94,8 @@ func (f *File) GetSwiftBuiltinTypes() (builtins []swift.BuiltinType, err error) 
 	if sec := f.Section("__TEXT", "__swift5_builtin"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %w", sec.Seg, sec.Name, err)
 		}
 
@@ -137,8 +137,8 @@ func (f *File) GetSwiftReflectionStrings() (map[uint64]string, error) {
 		}
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %w", sec.Seg, sec.Name, err)
 		}
 
@@ -174,8 +174,8 @@ func (f *File) GetSwiftFields() (fields []swift.Field, err error) {
 
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -211,6 +211,9 @@ func (f *File) readField(r io.ReadSeeker, addr uint64) (field *swift.Field, err 
 		return nil, fmt.Errorf("failed to read swift field descriptor string: %w", err)
 	}
 
+	if err := checkReadCount(r, uint64(field.NumFields), 4); err != nil {
+		return nil, fmt.Errorf("failed to read swift FieldRecordDescriptor: %v", err)
+	}
 	field.Records = make([]swift.FieldRecord, field.NumFields)
 
 	for i := 0; i < int(field.NumFields); i++ {
@@ -258,8 +261,8 @@ func (f *File) GetSwiftAssociatedTypes() (asstypes []swift.AssociatedType, err e
 	if sec := f.Section("__TEXT", "__swift5_assocty"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %w", sec.Seg, sec.Name, err)
 		}
 
@@ -280,6 +283,9 @@ func (f *File) GetSwiftAssociatedTypes() (asstypes []swift.AssociatedType, err e
 				return nil, fmt.Errorf("failed to read swift AssociatedTypeDescriptor: %w", err)
 			}
 
+			if err := checkReadCount(r, uint64(atyp.NumAssociatedTypes), 4); err != nil {
+				return nil, fmt.Errorf("failed to read AssociatedTypeRecord: %w", err)
+			}
 			atyp.TypeRecords = make([]swift.ATRecordType, atyp.NumAssociatedTypes)
 			for i := uint32(0); i < atyp.NumAssociatedTypes; i++ {
 				curr, _ = r.Seek(0, io.SeekCurrent)
@@ -323,8 +329,8 @@ func (f *File) GetSwiftProtocols() (protos []swift.Protocol, err error) {
 	if sec := f.Section("__TEXT", "__swift5_protos"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %w", sec.Seg, sec.Name, err)
 		}
 
@@ -376,8 +382,8 @@ func (f *File) GetSwiftProtocolConformances() (protoConfDescs []swift.Conformanc
 	if sec := f.Section("__TEXT", "__swift5_proto"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %w", sec.Seg, sec.Name, err)
 		}
 
@@ -420,8 +426,8 @@ func (f *File) GetSwiftClosures() (closures []swift.Capture, err error) {
 	if sec := f.Section("__TEXT", "__swift5_capture"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -440,6 +446,9 @@ func (f *File) GetSwiftClosures() (closures []swift.Capture, err error) {
 			}
 
 			if capture.NumCaptureTypes > 0 {
+				if err := checkReadCount(r, uint64(capture.NumCaptureTypes), 4); err != nil {
+					return nil, fmt.Errorf("failed to read swift %T: %v", swift.CaptureTypeRecord{}, err)
+				}
 				capture.CaptureTypes = make([]swift.CaptureType, capture.NumCaptureTypes)
 				for i := uint32(0); i < capture.NumCaptureTypes; i++ {
 					curr, _ := r.Seek(0, io.SeekCurrent)
@@ -456,6 +465,9 @@ func (f *File) GetSwiftClosures() (closures []swift.Capture, err error) {
 			}
 
 			if capture.NumMetadataSources > 0 {
+				if err := checkReadCount(r, uint64(capture.NumMetadataSources), 4); err != nil {
+					return nil, fmt.Errorf("failed to read swift %T: %v", swift.MetadataSourceRecord{}, err)
+				}
 				capture.MetadataSources = make([]swift.MetadataSource, capture.NumMetadataSources)
 				for i := uint32(0); i < capture.NumMetadataSources; i++ {
 					curr, _ := r.Seek(0, io.SeekCurrent)
@@ -503,8 +515,8 @@ func (f *File) GetSwiftDynamicReplacementInfo() (*swift.AutomaticDynamicReplacem
 		}
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -535,8 +547,8 @@ func (f *File) GetSwiftDynamicReplacementInfoForOpaqueTypes() (*swift.AutomaticD
 		}
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -546,6 +558,9 @@ func (f *File) GetSwiftDynamicReplacementInfoForOpaqueTypes() (*swift.AutomaticD
 		}
 		if err := binary.Read(bytes.NewReader(dat), f.ByteOrder, &rep2.NumReplacements); err != nil {
 			return nil, fmt.Errorf("failed to read %T: %v", rep2.NumReplacements, err)
+		}
+		if err := checkReadCount(bytes.NewReader(dat), uint64(rep2.NumReplacements), uint64(binary.Size(swift.DynamicReplacementSomeDescriptor{}))); err != nil {
+			return nil, fmt.Errorf("failed to read %T: %v", rep2.Replacements, err)
 		}
 		rep2.Replacements = make([]swift.DynamicReplacementSomeDescriptor, rep2.NumReplacements)
 		if err := binary.Read(bytes.NewReader(dat), f.ByteOrder, &rep2.Replacements); err != nil {
@@ -567,8 +582,8 @@ func (f *File) GetSwiftAccessibleFunctions() (funcs []swift.AccessibleFunction, 
 		}
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -727,8 +742,8 @@ func (f *File) GetSwiftMultiPayloadEnums() (mpenums []swift.MultiPayloadEnum, er
 		}
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -799,8 +814,8 @@ func (f *File) GetSwiftColocateTypeDescriptors() ([]swift.Type, error) {
 
 		f.cr.Seek(int64(off), io.SeekStart)
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %w", sec.Seg, sec.Name, err)
 		}
 
@@ -857,8 +872,8 @@ func (f *File) GetSwiftTypes() (typs []swift.Type, err error) {
 			}
 			f.cr.Seek(int64(off), io.SeekStart)
 
-			dat := make([]byte, sec.Size)
-			if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+			var dat []byte
+			if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 				return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 			}
 
@@ -1006,12 +1021,18 @@ func (f *File) parseExtension(r io.ReadSeeker, typ *swift.Type) (err error) {
 		if err := binary.Read(r, f.ByteOrder, &ext.GenericContext.TargetGenericContextDescriptorHeader); err != nil {
 			return fmt.Errorf("failed to read generic header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(ext.GenericContext.NumParams), uint64(binary.Size(swift.GenericParamDescriptor(0)))); err != nil {
+			return fmt.Errorf("failed to read generic params: %v", err)
+		}
 		ext.GenericContext.Parameters = make([]swift.GenericParamDescriptor, ext.GenericContext.NumParams)
 		if err := binary.Read(r, f.ByteOrder, &ext.GenericContext.Parameters); err != nil {
 			return fmt.Errorf("failed to read generic params: %v", err)
 		}
 		curr, _ := r.Seek(0, io.SeekCurrent)
 		r.Seek(int64(Align(uint64(curr), 4)), io.SeekStart)
+		if err := checkReadCount(r, uint64(ext.GenericContext.NumRequirements), 4); err != nil {
+			return fmt.Errorf("failed to read generic requirement: %v", err)
+		}
 		ext.GenericContext.Requirements = make([]swift.TargetGenericRequirementDescriptor, ext.GenericContext.NumRequirements)
 		for i := 0; i < int(ext.GenericContext.NumRequirements); i++ {
 			curr, _ = r.Seek(0, io.SeekCurrent)
@@ -1023,6 +1044,9 @@ func (f *File) parseExtension(r io.ReadSeeker, typ *swift.Type) (err error) {
 			var hdr swift.GenericPackShapeHeader
 			if err := binary.Read(r, f.ByteOrder, &hdr); err != nil {
 				return fmt.Errorf("failed to read generic pack shape header: %v", err)
+			}
+			if err := checkReadCount(r, uint64(hdr.NumPacks), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+				return fmt.Errorf("failed to read generic pack shape descriptors: %v", err)
 			}
 			ext.GenericContext.TypePacks = make([]swift.GenericPackShapeDescriptor, hdr.NumPacks)
 			if err := binary.Read(r, f.ByteOrder, &ext.GenericContext.TypePacks); err != nil {
@@ -1071,12 +1095,18 @@ func (f *File) parseAnonymous(r io.ReadSeeker, typ *swift.Type) (err error) {
 		if err := binary.Read(r, f.ByteOrder, &anon.GenericContext.TargetGenericContextDescriptorHeader); err != nil {
 			return fmt.Errorf("failed to read generic header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(anon.GenericContext.NumParams), uint64(binary.Size(swift.GenericParamDescriptor(0)))); err != nil {
+			return fmt.Errorf("failed to read generic params: %v", err)
+		}
 		anon.GenericContext.Parameters = make([]swift.GenericParamDescriptor, anon.GenericContext.NumParams)
 		if err := binary.Read(r, f.ByteOrder, &anon.GenericContext.Parameters); err != nil {
 			return fmt.Errorf("failed to read generic params: %v", err)
 		}
 		curr, _ := r.Seek(0, io.SeekCurrent)
 		r.Seek(int64(Align(uint64(curr), 4)), io.SeekStart)
+		if err := checkReadCount(r, uint64(anon.GenericContext.NumRequirements), 4); err != nil {
+			return fmt.Errorf("failed to read generic requirement: %v", err)
+		}
 		anon.GenericContext.Requirements = make([]swift.TargetGenericRequirementDescriptor, anon.GenericContext.NumRequirements)
 		for i := 0; i < int(anon.GenericContext.NumRequirements); i++ {
 			curr, _ = r.Seek(0, io.SeekCurrent)
@@ -1088,6 +1118,9 @@ func (f *File) parseAnonymous(r io.ReadSeeker, typ *swift.Type) (err error) {
 			var hdr swift.GenericPackShapeHeader
 			if err := binary.Read(r, f.ByteOrder, &hdr); err != nil {
 				return fmt.Errorf("failed to read generic pack shape header: %v", err)
+			}
+			if err := checkReadCount(r, uint64(hdr.NumPacks), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+				return fmt.Errorf("failed to read generic pack shape descriptors: %v", err)
 			}
 			anon.GenericContext.TypePacks = make([]swift.GenericPackShapeDescriptor, hdr.NumPacks)
 			if err := binary.Read(r, f.ByteOrder, &anon.GenericContext.TypePacks); err != nil {
@@ -1141,6 +1174,9 @@ func (f *File) parseProtocol(r io.ReadSeeker, typ *swift.Type) (prot *swift.Prot
 	}
 
 	if prot.NumRequirementsInSignature > 0 {
+		if err := checkReadCount(r, uint64(prot.NumRequirementsInSignature), 4); err != nil {
+			return nil, fmt.Errorf("failed to read protocols signature requirements : %v", err)
+		}
 		prot.SignatureRequirements = make([]swift.TargetGenericRequirement, prot.NumRequirementsInSignature)
 		for i := 0; i < int(prot.NumRequirementsInSignature); i++ {
 			curr, _ := r.Seek(0, io.SeekCurrent)
@@ -1151,6 +1187,9 @@ func (f *File) parseProtocol(r io.ReadSeeker, typ *swift.Type) (prot *swift.Prot
 	}
 
 	if prot.NumRequirements > 0 {
+		if err := checkReadCount(r, uint64(prot.NumRequirements), 4); err != nil {
+			return nil, fmt.Errorf("failed to read protocols requirements : %v", err)
+		}
 		prot.Requirements = make([]swift.TargetProtocolRequirement, prot.NumRequirements)
 		for i := 0; i < int(prot.NumRequirements); i++ {
 			curr, _ := r.Seek(0, io.SeekCurrent)
@@ -1293,6 +1332,9 @@ func (f *File) readProtocolConformance(r io.ReadSeeker, addr uint64) (pcd *swift
 	}
 
 	if pcd.Flags.GetNumConditionalRequirements() > 0 {
+		if err := checkReadCount(r, uint64(pcd.Flags.GetNumConditionalRequirements()), 4); err != nil {
+			return nil, fmt.Errorf("failed to read conditional requirement: %v", err)
+		}
 		pcd.ConditionalRequirements = make([]swift.TargetGenericRequirement, pcd.Flags.GetNumConditionalRequirements())
 		for i := 0; i < pcd.Flags.GetNumConditionalRequirements(); i++ {
 			curr, _ := r.Seek(0, io.SeekCurrent)
@@ -1303,6 +1345,9 @@ func (f *File) readProtocolConformance(r io.ReadSeeker, addr uint64) (pcd *swift
 	}
 
 	if pcd.Flags.NumConditionalPackShapeDescriptors() > 0 {
+		if err := checkReadCount(r, uint64(pcd.Flags.NumConditionalPackShapeDescriptors()), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+			return nil, fmt.Errorf("failed to read conditional pack shape descriptors: %v", err)
+		}
 		pcd.ConditionalPackShapes = make([]swift.GenericPackShapeDescriptor, pcd.Flags.NumConditionalPackShapeDescriptors())
 		if err := binary.Read(r, f.ByteOrder, &pcd.ConditionalPackShapes); err != nil {
 			return nil, fmt.Errorf("failed to read conditional pack shape descriptors: %v", err)
@@ -1317,6 +1362,9 @@ func (f *File) readProtocolConformance(r io.ReadSeeker, addr uint64) (pcd *swift
 		const maxResilientWitnesses = 65536
 		if rwit.NumWitnesses > maxResilientWitnesses {
 			return nil, fmt.Errorf("implausible witness count %d", rwit.NumWitnesses)
+		}
+		if err := checkReadCount(r, uint64(rwit.NumWitnesses), 4); err != nil {
+			return nil, fmt.Errorf("failed to read protocols requirements : %v", err)
 		}
 		pcd.ResilientWitnesses = make([]swift.ResilientWitnesses, rwit.NumWitnesses)
 		for i := 0; i < int(rwit.NumWitnesses); i++ {
@@ -1614,12 +1662,18 @@ func (f *File) parseOpaqueType(r io.ReadSeeker, typ *swift.Type) (err error) {
 		if err := binary.Read(r, f.ByteOrder, &ot.GenericContext.TargetGenericContextDescriptorHeader); err != nil {
 			return fmt.Errorf("failed to read generic header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(ot.GenericContext.NumParams), uint64(binary.Size(swift.GenericParamDescriptor(0)))); err != nil {
+			return fmt.Errorf("failed to read generic params: %v", err)
+		}
 		ot.GenericContext.Parameters = make([]swift.GenericParamDescriptor, ot.GenericContext.NumParams)
 		if err := binary.Read(r, f.ByteOrder, &ot.GenericContext.Parameters); err != nil {
 			return fmt.Errorf("failed to read generic params: %v", err)
 		}
 		curr, _ := r.Seek(0, io.SeekCurrent)
 		r.Seek(int64(Align(uint64(curr), 4)), io.SeekStart)
+		if err := checkReadCount(r, uint64(ot.GenericContext.NumRequirements), 4); err != nil {
+			return fmt.Errorf("failed to read generic requirement: %v", err)
+		}
 		ot.GenericContext.Requirements = make([]swift.TargetGenericRequirementDescriptor, ot.GenericContext.NumRequirements)
 		for i := 0; i < int(ot.GenericContext.NumRequirements); i++ {
 			curr, _ = r.Seek(0, io.SeekCurrent)
@@ -1631,6 +1685,9 @@ func (f *File) parseOpaqueType(r io.ReadSeeker, typ *swift.Type) (err error) {
 			var hdr swift.GenericPackShapeHeader
 			if err := binary.Read(r, f.ByteOrder, &hdr); err != nil {
 				return fmt.Errorf("failed to read generic pack shape header: %v", err)
+			}
+			if err := checkReadCount(r, uint64(hdr.NumPacks), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+				return fmt.Errorf("failed to read generic pack shape descriptors: %v", err)
 			}
 			ot.GenericContext.TypePacks = make([]swift.GenericPackShapeDescriptor, hdr.NumPacks)
 			if err := binary.Read(r, f.ByteOrder, &ot.GenericContext.TypePacks); err != nil {
@@ -1698,12 +1755,18 @@ func (f *File) parseClassDescriptor(r io.ReadSeeker, typ *swift.Type) (err error
 		if err := class.GenericContext.TargetTypeGenericContextDescriptorHeader.Read(r, typ.Address+uint64(curr-off)); err != nil {
 			return fmt.Errorf("failed to read generic header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(class.GenericContext.Base.NumParams), uint64(binary.Size(swift.GenericParamDescriptor(0)))); err != nil {
+			return fmt.Errorf("failed to read generic params: %v", err)
+		}
 		class.GenericContext.Parameters = make([]swift.GenericParamDescriptor, class.GenericContext.Base.NumParams)
 		if err := binary.Read(r, f.ByteOrder, &class.GenericContext.Parameters); err != nil {
 			return fmt.Errorf("failed to read generic params: %v", err)
 		}
 		curr, _ = r.Seek(0, io.SeekCurrent)
 		r.Seek(int64(Align(uint64(curr), 4)), io.SeekStart)
+		if err := checkReadCount(r, uint64(class.GenericContext.Base.NumRequirements), 4); err != nil {
+			return fmt.Errorf("failed to read generic requirement: %v", err)
+		}
 		class.GenericContext.Requirements = make([]swift.TargetGenericRequirement, class.GenericContext.Base.NumRequirements)
 		for i := 0; i < int(class.GenericContext.Base.NumRequirements); i++ {
 			curr, _ = r.Seek(0, io.SeekCurrent)
@@ -1715,6 +1778,9 @@ func (f *File) parseClassDescriptor(r io.ReadSeeker, typ *swift.Type) (err error
 			var hdr swift.GenericPackShapeHeader
 			if err := binary.Read(r, f.ByteOrder, &hdr); err != nil {
 				return fmt.Errorf("failed to read generic pack shape header: %v", err)
+			}
+			if err := checkReadCount(r, uint64(hdr.NumPacks), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+				return fmt.Errorf("failed to read generic pack shape descriptors: %v", err)
 			}
 			class.GenericContext.TypePacks = make([]swift.GenericPackShapeDescriptor, hdr.NumPacks)
 			if err := binary.Read(r, f.ByteOrder, &class.GenericContext.TypePacks); err != nil {
@@ -1752,6 +1818,9 @@ func (f *File) parseClassDescriptor(r io.ReadSeeker, typ *swift.Type) (err error
 		if err := binary.Read(r, f.ByteOrder, &class.VTable.TargetVTableDescriptorHeader); err != nil {
 			return fmt.Errorf("failed to read vtable header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(class.VTable.VTableSize), 4); err != nil {
+			return fmt.Errorf("failed to read vtable method descriptor: %v", err)
+		}
 		class.VTable.Methods = make([]swift.Method, class.VTable.VTableSize)
 		for i := 0; i < int(class.VTable.VTableSize); i++ {
 			curr, _ := r.Seek(0, io.SeekCurrent)
@@ -1765,6 +1834,9 @@ func (f *File) parseClassDescriptor(r io.ReadSeeker, typ *swift.Type) (err error
 		var ohdr swift.TargetOverrideTableHeader
 		if err := binary.Read(r, f.ByteOrder, &ohdr); err != nil {
 			return fmt.Errorf("failed to read method override table header: %v", err)
+		}
+		if err := checkReadCount(r, uint64(ohdr.NumEntries), 4); err != nil {
+			return fmt.Errorf("failed to read method override table entry: %v", err)
 		}
 		class.MethodOverrides = make([]swift.TargetMethodOverrideDescriptor, ohdr.NumEntries)
 		for i := uint32(0); i < ohdr.NumEntries; i++ {
@@ -1788,6 +1860,9 @@ func (f *File) parseClassDescriptor(r io.ReadSeeker, typ *swift.Type) (err error
 		if err := binary.Read(r, f.ByteOrder, &lc); err != nil {
 			return fmt.Errorf("failed to read canonical metadata prespecialization: %v", err)
 		}
+		if err := checkReadCount(r, uint64(lc.Count), 4); err != nil {
+			return fmt.Errorf("failed to read canonical metadata list entry: %v", err)
+		}
 		class.Metadatas = make([]swift.Metadata, lc.Count)
 		for i := 0; i < int(lc.Count); i++ {
 			curr, _ := r.Seek(0, io.SeekCurrent)
@@ -1799,6 +1874,9 @@ func (f *File) parseClassDescriptor(r io.ReadSeeker, typ *swift.Type) (err error
 		curr, _ := r.Seek(0, io.SeekCurrent)
 		if err := class.CachingOnceToken.Read(r, typ.Address+uint64(curr-off)); err != nil {
 			return fmt.Errorf("failed to read canonical metadata prespecialization: %v", err)
+		}
+		if err := checkReadCount(r, uint64(lc.Count), 4); err != nil {
+			return fmt.Errorf("failed to read canonical metadata accessors list entry: %v", err)
 		}
 		class.MetadataAccessors = make([]swift.TargetCanonicalSpecializedMetadataAccessorsListEntry, lc.Count)
 		for i := 0; i < int(lc.Count); i++ {
@@ -2015,12 +2093,18 @@ func (f *File) parseStructDescriptor(r io.ReadSeeker, typ *swift.Type) (err erro
 		if err := st.GenericContext.TargetTypeGenericContextDescriptorHeader.Read(r, typ.Address+uint64(curr-off)); err != nil {
 			return fmt.Errorf("failed to read generic header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(st.GenericContext.Base.NumParams), uint64(binary.Size(swift.GenericParamDescriptor(0)))); err != nil {
+			return fmt.Errorf("failed to read generic params: %v", err)
+		}
 		st.GenericContext.Parameters = make([]swift.GenericParamDescriptor, st.GenericContext.Base.NumParams)
 		if err := binary.Read(r, f.ByteOrder, &st.GenericContext.Parameters); err != nil {
 			return fmt.Errorf("failed to read generic params: %v", err)
 		}
 		curr, _ = r.Seek(0, io.SeekCurrent)
 		r.Seek(int64(Align(uint64(curr), 4)), io.SeekStart)
+		if err := checkReadCount(r, uint64(st.GenericContext.Base.NumRequirements), 4); err != nil {
+			return fmt.Errorf("failed to read generic requirement: %v", err)
+		}
 		st.GenericContext.Requirements = make([]swift.TargetGenericRequirement, st.GenericContext.Base.NumRequirements)
 		for i := 0; i < int(st.GenericContext.Base.NumRequirements); i++ {
 			curr, _ = r.Seek(0, io.SeekCurrent)
@@ -2032,6 +2116,9 @@ func (f *File) parseStructDescriptor(r io.ReadSeeker, typ *swift.Type) (err erro
 			var hdr swift.GenericPackShapeHeader
 			if err := binary.Read(r, f.ByteOrder, &hdr); err != nil {
 				return fmt.Errorf("failed to read generic pack shape header: %v", err)
+			}
+			if err := checkReadCount(r, uint64(hdr.NumPacks), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+				return fmt.Errorf("failed to read generic pack shape descriptors: %v", err)
 			}
 			st.GenericContext.TypePacks = make([]swift.GenericPackShapeDescriptor, hdr.NumPacks)
 			if err := binary.Read(r, f.ByteOrder, &st.GenericContext.TypePacks); err != nil {
@@ -2060,6 +2147,9 @@ func (f *File) parseStructDescriptor(r io.ReadSeeker, typ *swift.Type) (err erro
 		var lc swift.TargetCanonicalSpecializedMetadatasListCount
 		if err := binary.Read(r, f.ByteOrder, &lc); err != nil {
 			return fmt.Errorf("failed to read canonical metadata prespecialization: %v", err)
+		}
+		if err := checkReadCount(r, uint64(lc.Count), 4); err != nil {
+			return fmt.Errorf("failed to read canonical metadata list entry: %v", err)
 		}
 		st.Metadatas = make([]swift.Metadata, lc.Count)
 		for i := 0; i < int(lc.Count); i++ {
@@ -2153,12 +2243,18 @@ func (f *File) parseEnumDescriptor(r io.ReadSeeker, typ *swift.Type) (err error)
 		if err := enum.GenericContext.TargetTypeGenericContextDescriptorHeader.Read(r, typ.Address+uint64(curr-off)); err != nil {
 			return fmt.Errorf("failed to read generic header: %v", err)
 		}
+		if err := checkReadCount(r, uint64(enum.GenericContext.Base.NumParams), uint64(binary.Size(swift.GenericParamDescriptor(0)))); err != nil {
+			return fmt.Errorf("failed to read generic params: %v", err)
+		}
 		enum.GenericContext.Parameters = make([]swift.GenericParamDescriptor, enum.GenericContext.Base.NumParams)
 		if err := binary.Read(r, f.ByteOrder, &enum.GenericContext.Parameters); err != nil {
 			return fmt.Errorf("failed to read generic params: %v", err)
 		}
 		curr, _ = r.Seek(0, io.SeekCurrent)
 		r.Seek(int64(Align(uint64(curr), 4)), io.SeekStart)
+		if err := checkReadCount(r, uint64(enum.GenericContext.Base.NumRequirements), 4); err != nil {
+			return fmt.Errorf("failed to read generic requirement: %v", err)
+		}
 		enum.GenericContext.Requirements = make([]swift.TargetGenericRequirement, enum.GenericContext.Base.NumRequirements)
 		for i := 0; i < int(enum.GenericContext.Base.NumRequirements); i++ {
 			curr, _ = r.Seek(0, io.SeekCurrent)
@@ -2170,6 +2266,9 @@ func (f *File) parseEnumDescriptor(r io.ReadSeeker, typ *swift.Type) (err error)
 			var hdr swift.GenericPackShapeHeader
 			if err := binary.Read(r, f.ByteOrder, &hdr); err != nil {
 				return fmt.Errorf("failed to read generic pack shape header: %v", err)
+			}
+			if err := checkReadCount(r, uint64(hdr.NumPacks), uint64(binary.Size(swift.GenericPackShapeDescriptor{}))); err != nil {
+				return fmt.Errorf("failed to read generic pack shape descriptors: %v", err)
 			}
 			enum.GenericContext.TypePacks = make([]swift.GenericPackShapeDescriptor, hdr.NumPacks)
 			if err := binary.Read(r, f.ByteOrder, &enum.GenericContext.TypePacks); err != nil {
@@ -2198,6 +2297,9 @@ func (f *File) parseEnumDescriptor(r io.ReadSeeker, typ *swift.Type) (err error)
 		var lc swift.TargetCanonicalSpecializedMetadatasListCount
 		if err := binary.Read(r, f.ByteOrder, &lc); err != nil {
 			return fmt.Errorf("failed to read canonical metadata prespecialization: %v", err)
+		}
+		if err := checkReadCount(r, uint64(lc.Count), 4); err != nil {
+			return fmt.Errorf("failed to read canonical metadata list entry: %v", err)
 		}
 		enum.Metadatas = make([]swift.Metadata, lc.Count)
 		for i := 0; i < int(lc.Count); i++ {
@@ -2603,6 +2705,13 @@ func normalizeObjCProtocolMangledName(name string) (string, bool) {
 }
 
 func (f *File) getContextDesc(addr uint64) (ctx *swift.TargetModuleContext, err error) {
+	return f.getContextDescChain(addr, nil)
+}
+
+// getContextDescChain is getContextDesc with the descriptor addresses of the
+// children that led here. A descriptor that is its own ancestor (or an
+// absurdly deep chain) would otherwise recurse until the stack overflows.
+func (f *File) getContextDescChain(addr uint64, chain []uint64) (ctx *swift.TargetModuleContext, err error) {
 	var ptr uint64
 
 	if (addr & 1) == 1 {
@@ -2654,7 +2763,13 @@ func (f *File) getContextDesc(addr uint64) (ctx *swift.TargetModuleContext, err 
 	}
 
 	if ctx.ParentOffset.IsSet() {
-		parent, err := f.getContextDesc(ctx.ParentOffset.GetAddress())
+		if slices.Contains(chain, ptr) {
+			return nil, fmt.Errorf("swift context descriptor at address %#x is its own ancestor (parent cycle)", ptr)
+		}
+		if len(chain) >= maxSwiftContextDepth {
+			return nil, fmt.Errorf("swift context descriptor parent chain at address %#x is deeper than %d", ptr, maxSwiftContextDepth)
+		}
+		parent, err := f.getContextDescChain(ctx.ParentOffset.GetAddress(), append(chain, ptr))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read swift context descriptor parent context: %w", err)
 		}
@@ -3073,13 +3188,13 @@ func (f *File) makeSymbolicMangledNameStringRef(addr uint64) (string, error) {
 			if part == "" {
 				continue
 			}
-			if regexp.MustCompile("So[0-9]+").MatchString(part) {
+			if swiftObjCPrefixRE.MatchString(part) {
 				if strings.Contains(part, "OS_dispatch_queue") {
 					out = append(out, "DispatchQueue")
 				} else {
 					out = append(out, "_$s"+part)
 				}
-			} else if regexp.MustCompile("^[0-9]+").MatchString(part) {
+			} else if swiftLeadingDigitsRE.MatchString(part) {
 				// remove leading numbers
 				for i, c := range part {
 					if !unicode.IsNumber(c) {
@@ -3173,7 +3288,7 @@ func (f *File) makeSymbolicMangledNameStringRef(addr uint64) (string, error) {
 				if err != nil {
 					return "", fmt.Errorf("failed to read swift context descriptor descriptor name: %v", err)
 				}
-				if regexp.MustCompile("^[0-9]+").MatchString(name) {
+				if swiftLeadingDigitsRE.MatchString(name) {
 					name = "_$sl" + name
 				}
 				// if symbolic {
@@ -3194,7 +3309,7 @@ func (f *File) makeSymbolicMangledNameStringRef(addr uint64) (string, error) {
 				if err != nil {
 					return "", fmt.Errorf("failed to read swift context descriptor descriptor name: %v", err)
 				}
-				if regexp.MustCompile("^[0-9]+").MatchString(name) {
+				if swiftLeadingDigitsRE.MatchString(name) {
 					name = "_$sl" + name
 				}
 				// if symbolic {

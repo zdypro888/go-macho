@@ -380,8 +380,8 @@ func (f *File) GetObjCImageInfo() (*objc.ImageInfo, error) {
 				}
 				f.cr.Seek(int64(off), io.SeekStart)
 
-				dat := make([]byte, sec.Size)
-				if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+				var dat []byte
+				if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 					return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 				}
 
@@ -619,8 +619,8 @@ func (f *File) GetObjCClassNames() (map[uint64]string, error) {
 			return nil, fmt.Errorf("failed to seek to %s addr %#x: %v", sec.Name, sec.Addr, err)
 		}
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -657,8 +657,8 @@ func (f *File) GetObjCMethodNames() (map[uint64]string, error) {
 			return nil, fmt.Errorf("failed to seek to %s addr %#x: %v", sec.Name, sec.Addr, err)
 		}
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -1397,8 +1397,8 @@ func (f *File) GetObjCMethodLists() ([]objc.Method, error) {
 			return nil, fmt.Errorf("failed to seek to %s addr %#x: %v", sec.Name, sec.Addr, err)
 		}
 
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -2042,8 +2042,8 @@ func (f *File) GetObjCIntegerObjects() (map[uint64]*objc.IntObj, error) {
 		if err := f.cr.SeekToAddr(sec.Addr); err != nil {
 			return nil, fmt.Errorf("failed to seek to %s addr %#x: %v", sec.Name, sec.Addr, err)
 		}
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 
@@ -2069,8 +2069,8 @@ func (f *File) GetObjCStubs(parse func(uint64, []byte) (map[uint64]*objc.Stub, e
 		if err := f.cr.SeekToAddr(sec.Addr); err != nil {
 			return nil, fmt.Errorf("failed to seek to %s addr %#x: %v", sec.Name, sec.Addr, err)
 		}
-		dat := make([]byte, sec.Size)
-		if err := binary.Read(f.cr, f.ByteOrder, dat); err != nil {
+		var dat []byte
+		if err := readDataFrom(f.cr, sec.Size, &dat); err != nil {
 			return nil, fmt.Errorf("failed to read %s.%s data: %v", sec.Seg, sec.Name, err)
 		}
 		return parse(sec.Addr, dat)
