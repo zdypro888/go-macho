@@ -766,6 +766,27 @@ func (f *File) SaveBuffer(buf *bytes.Buffer) error {
 	return nil
 }
 
+// exportedSegmentMemsz returns the vmsize of an exported segment whose new,
+// page-aligned file size is filesz.
+//
+// 行为变更说明: 以前凡是 origMemsz > origFilesz 都用 filesz + (origMemsz - origFilesz)。
+// filesz 是按页对齐后的大小，当它已经大于 origFilesz 时，对齐补出来的那部分被重复
+// 计入：/bin/ls 的 __LINKEDIT（filesz 0x5a60, vmsize 0x8000）导出后 vmsize 变成
+// 0xa5a0，既不按页对齐，又大于原值。zerofill 区的地址是固定的（到 段起始 + origMemsz
+// 为止），所以这种情况取 max(filesz, origMemsz)，/bin/ls 导出后恢复为 0x8000。
+// 其余情况与之前完全相同：filesz <= origFilesz（包括纯 zerofill 段 filesz=0、以及
+// 文件大小本来就按页对齐的带 bss 的 __DATA）仍用原公式，没有 zerofill 时仍取 filesz。
+func exportedSegmentMemsz(filesz, origFilesz, origMemsz uint64) uint64 {
+	switch {
+	case origMemsz <= origFilesz:
+		return filesz
+	case filesz > origFilesz:
+		return max(filesz, origMemsz)
+	default:
+		return filesz + (origMemsz - origFilesz)
+	}
+}
+
 func (f *File) optimizeLoadCommands(segMap exportSegMap, inCache bool) error {
 	for _, l := range f.Loads {
 		switch l.Command() {
@@ -782,11 +803,7 @@ func (f *File) optimizeLoadCommands(segMap exportSegMap, inCache bool) error {
 			seg.Offset = off
 			seg.Filesz = sz
 			// preserve extra virtual memory for zerofill sections (.bss etc.)
-			if smi.OrigMemsz > smi.OrigFilesz {
-				seg.Memsz = sz + (smi.OrigMemsz - smi.OrigFilesz)
-			} else {
-				seg.Memsz = sz
-			}
+			seg.Memsz = exportedSegmentMemsz(sz, smi.OrigFilesz, smi.OrigMemsz)
 
 			for i := uint32(0); i < seg.Nsect; i++ {
 				sect := f.Sections[i+seg.Firstsect]
