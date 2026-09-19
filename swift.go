@@ -91,6 +91,7 @@ func (f *File) GetSwiftEntry() (uint64, error) {
 
 // GetSwiftBuiltinTypes parses all the built-in types in the __TEXT.__swift5_builtin section
 func (f *File) GetSwiftBuiltinTypes() (builtins []swift.BuiltinType, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_builtin"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
@@ -166,6 +167,7 @@ func (f *File) GetSwiftReflectionStrings() (map[uint64]string, error) {
 
 // GetSwiftFields parses all the fields in the __TEXT.__swift5_fields section
 func (f *File) GetSwiftFields() (fields []swift.Field, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_fieldmd"); sec != nil {
 		off, err := f.vma.GetOffset(sec.Addr)
 		if err != nil {
@@ -258,6 +260,7 @@ func (f *File) readField(r io.ReadSeeker, addr uint64) (field *swift.Field, err 
 
 // GetSwiftAssociatedTypes parses all the associated types in the __TEXT.__swift5_assocty section
 func (f *File) GetSwiftAssociatedTypes() (asstypes []swift.AssociatedType, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_assocty"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
@@ -326,6 +329,7 @@ func (f *File) GetSwiftAssociatedTypes() (asstypes []swift.AssociatedType, err e
 
 // GetSwiftProtocols parses all the protocols in the __TEXT.__swift5_protos section
 func (f *File) GetSwiftProtocols() (protos []swift.Protocol, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_protos"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
@@ -379,6 +383,7 @@ func (f *File) GetSwiftProtocols() (protos []swift.Protocol, err error) {
 
 // GetSwiftProtocolConformances parses all the protocol conformances in the __TEXT.__swift5_proto section
 func (f *File) GetSwiftProtocolConformances() (protoConfDescs []swift.ConformanceDescriptor, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_proto"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
@@ -423,6 +428,7 @@ func (f *File) GetSwiftProtocolConformances() (protoConfDescs []swift.Conformanc
 
 // GetSwiftClosures parses all the closure context objects in the __TEXT.__swift5_capture section
 func (f *File) GetSwiftClosures() (closures []swift.Capture, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_capture"); sec != nil {
 		f.cr.SeekToAddr(sec.Addr)
 
@@ -575,6 +581,7 @@ func (f *File) GetSwiftDynamicReplacementInfoForOpaqueTypes() (*swift.AutomaticD
 
 // GetSwiftAccessibleFunctions parses the __TEXT.__swift5_acfuncs section
 func (f *File) GetSwiftAccessibleFunctions() (funcs []swift.AccessibleFunction, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_acfuncs"); sec != nil {
 		off, err := f.vma.GetOffset(sec.Addr)
 		if err != nil {
@@ -735,6 +742,7 @@ func (f *File) swiftTypeRefRecordSize(addr, maxSize uint64) (uint64, bool, error
 
 // GetSwiftMultiPayloadEnums TODO: finish me
 func (f *File) GetSwiftMultiPayloadEnums() (mpenums []swift.MultiPayloadEnum, err error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__swift5_mpenum"); sec != nil {
 		off, err := f.vma.GetOffset(sec.Addr)
 		if err != nil {
@@ -804,6 +812,7 @@ func (f *File) GetSwiftMultiPayloadEnums() (mpenums []swift.MultiPayloadEnum, er
 
 // GetSwiftColocateTypeDescriptors parses all the colocated type descriptors in the __TEXT.__constg_swiftt section
 func (f *File) GetSwiftColocateTypeDescriptors() ([]swift.Type, error) {
+	defer f.swiftContextScope()()
 	if sec := f.Section("__TEXT", "__constg_swiftt"); sec != nil {
 		var typs []swift.Type
 
@@ -856,6 +865,7 @@ func (f *File) GetSwiftColocatedMetadataFunctions() (*types.Section, error) {
 // Deprecated: __textg_swiftm contains executable metadata accessor functions,
 // not ConformanceDescriptor records. Use GetSwiftColocatedMetadataFunctions.
 func (f *File) GetSwiftColocateMetadata() ([]swift.ConformanceDescriptor, error) {
+	defer f.swiftContextScope()()
 	if _, err := f.GetSwiftColocatedMetadataFunctions(); err != nil {
 		return nil, err
 	}
@@ -864,6 +874,7 @@ func (f *File) GetSwiftColocateMetadata() ([]swift.ConformanceDescriptor, error)
 
 // GetSwiftTypes parses all the swift in the __TEXT.__swift5_types section
 func (f *File) GetSwiftTypes() (typs []swift.Type, err error) {
+	defer f.swiftContextScope()()
 	for _, sec := range f.Sections {
 		if sec.Seg == "__TEXT" && (sec.Name == "__swift5_types" || sec.Name == "__swift5_types2") {
 			off, err := f.vma.GetOffset(sec.Addr)
@@ -2507,6 +2518,7 @@ func (f *File) parseGenericContext(ctx *swift.TypeGenericContext) (err error) {
 
 // PreCache will precache all swift fields, types and built-in types (to hopefully improve performance)
 func (f *File) PreCache() error {
+	defer f.swiftContextScope()()
 	if _, err := f.GetSwiftFields(); err != nil {
 		if !errors.Is(err, ErrSwiftSectionError) {
 			return fmt.Errorf("failed to precache swift fields: %w", err)
@@ -2704,7 +2716,10 @@ func normalizeObjCProtocolMangledName(name string) (string, bool) {
 	return encoded[digits:], true
 }
 
-func (f *File) getContextDesc(addr uint64) (ctx *swift.TargetModuleContext, err error) {
+// getContextDescUncached resolves the context descriptor at addr together
+// with its parent chain. getContextDesc (swift_ctxmemo.go) is the entry point;
+// it answers repeated requests from a per-call memo.
+func (f *File) getContextDescUncached(addr uint64) (ctx *swift.TargetModuleContext, err error) {
 	return f.getContextDescChain(addr, nil)
 }
 

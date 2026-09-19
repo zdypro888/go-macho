@@ -31,6 +31,22 @@ import (
 )
 
 // A File represents an open Mach-O file.
+//
+// A File must not be used from multiple goroutines at the same time. The
+// parsing methods (GetObjCClasses, GetSwiftTypes, GetFunctions, GetCStrings,
+// ...) all read through one shared seeking reader, so two of them running
+// concurrently - even two different ones, such as GetSwiftTypes and
+// GetObjCClasses - move each other's read position and return garbage or
+// spurious errors. The Swift caches are plain maps as well. The locks inside
+// File (mu, fixupsMu, lazyLoadMu, symIndexMu) only keep the individual caches
+// they guard consistent; they do not make File safe for concurrent use.
+// Callers that need parallelism must serialize access to a File themselves or
+// open one File per goroutine.
+//
+// Symtab (and Symtab.Syms) may be replaced at any time. Do not edit the
+// elements of Symtab.Syms in place after the first symbol lookup: the lookup
+// indexes behind FindSymbolAddress and FindAddressSymbols are tied to the
+// slice, not to its contents. ResetFixupsCache drops those indexes too.
 type File struct {
 	FileTOC
 
@@ -57,7 +73,17 @@ type File struct {
 	dyldInfoRebaseTargets map[uint64]uint64
 	dyldInfoRebaseValues  map[uint64]struct{}
 	dyldInfoBindsByAddr   map[uint64]types.Bind
+	bindNameIdx           bindNameIndex // GetBindName's index over binds; guarded by fixupsMu
 	lazyLoadMu            sync.Mutex
+
+	// symIndexMu guards symIdx, the lookup indexes of FindSymbolAddress and
+	// FindAddressSymbols (see symindex.go). It is a leaf lock.
+	symIndexMu sync.Mutex
+	symIdx     symbolIndexes
+
+	// swiftCtxMu guards swiftCtx, getContextDesc's per-call memo. Leaf lock.
+	swiftCtxMu sync.Mutex
+	swiftCtx   swiftContextMemo
 
 	objc   map[uint64]any
 	swift  map[uint64]any
@@ -2071,6 +2097,8 @@ func (f *File) ResetFixupsCache() {
 	f.dyldInfoRebaseTargets = nil
 	f.dyldInfoRebaseValues = nil
 	f.dyldInfoBindsByAddr = nil
+	f.bindNameIdx = bindNameIndex{}
+	f.resetSymbolIndexes()
 	if f.vma != nil {
 		f.vma.ChainedPointerFormat = 0
 	}
@@ -2458,14 +2486,22 @@ func (f *File) GetBindName(pointer uint64) (string, error) {
 			}
 			return "", fmt.Errorf("MachO does not contain dyld chained fixups importts")
 		} else if f.HasDyldInfo() || f.HasDyldInfoOnly() {
-			binds, err := f.GetBindInfo()
+			// first bind at that slot address, in bind-stream order
+			f.fixupsMu.Lock()
+			binds, err := f.getBindInfoLocked()
+			var (
+				name  string
+				found bool
+			)
+			if err == nil {
+				name, found = f.bindAtLocked(binds, pointer)
+			}
+			f.fixupsMu.Unlock()
 			if err != nil {
 				return "", fmt.Errorf("failed to parse classic dyld bind info: %v", err)
 			}
-			for _, bind := range binds {
-				if (bind.Start + bind.SegOffset) == pointer {
-					return bind.Name, nil
-				}
+			if found {
+				return name, nil
 			}
 			return "", fmt.Errorf("pointer %#x is not a bind", pointer)
 		}
@@ -5002,30 +5038,67 @@ func (f *File) LibraryOrdinalName(libraryOrdinal int) string {
 	}
 }
 
+// FindSymbolAddress returns the address of the named symbol.
+//
+// 行为变更说明: Mach-O 符号名区分大小写，以前全部用 strings.EqualFold 比较，
+// 同时存在 _value_A 和 _value_a 时，查 _value_a 会返回排在前面的 _value_A；
+// chained fixup 的 self-bind 靠这个函数解析，指针因此可能指向错误的符号。
+// 现在精确匹配优先（先符号表、再导出表）；完全没有精确匹配时才退回原来的
+// 不区分大小写匹配，且顺序与以前相同，所以以前能解析出来的名字现在仍然能解析。
+//
+// The precedence is: first exact match in the symbol table, first exact match
+// in the exports, first case-insensitive match in the symbol table, first
+// case-insensitive match in the exports. findSymbolAddressLinear is the plain
+// scan that defines this; the code below returns the same results from the
+// lookup indexes in symindex.go once a table has been queried often enough.
 func (f *File) FindSymbolAddress(symbol string) (uint64, error) {
 	if f.Symtab == nil {
 		return 0, &FormatError{0, "missing symbol table", nil}
 	}
-	// 行为变更说明: Mach-O 符号名区分大小写，以前全部用 strings.EqualFold 比较，
-	// 同时存在 _value_A 和 _value_a 时，查 _value_a 会返回排在前面的 _value_A；
-	// chained fixup 的 self-bind 靠这个函数解析，指针因此可能指向错误的符号。
-	// 现在精确匹配优先（先符号表、再导出表）；完全没有精确匹配时才退回原来的
-	// 不区分大小写匹配，且顺序与以前相同，所以以前能解析出来的名字现在仍然能解析。
+	syms := f.Symtab.Syms
 	var (
 		foldAddr  uint64
 		foldFound bool
 	)
-	for _, sym := range f.Symtab.Syms {
-		if sym.Name == symbol {
-			return sym.Value, nil
+	symIndex, symIndexed := f.symtabNameIndex(syms)
+	if symIndexed {
+		if i, ok := symIndex.exact[symbol]; ok {
+			if syms[i].Name != symbol {
+				return f.findSymbolAddressStale(symbol)
+			}
+			return syms[i].Value, nil
 		}
-		if !foldFound && strings.EqualFold(sym.Name, symbol) {
-			foldAddr, foldFound = sym.Value, true
+	} else {
+		for _, sym := range syms {
+			if sym.Name == symbol {
+				return sym.Value, nil
+			}
+			if !foldFound && strings.EqualFold(sym.Name, symbol) {
+				foldAddr, foldFound = sym.Value, true
+			}
 		}
 	}
-	exports, err := f.GetExports()
+	// symtabFold completes foldAddr/foldFound for the indexed case, where the
+	// case-insensitive match is only looked up once it is actually needed.
+	symtabFold := func() bool {
+		if symIndexed {
+			symIndexed = false
+			if i, ok := symIndex.foldFirst(symbol); ok {
+				if !strings.EqualFold(syms[i].Name, symbol) {
+					return false
+				}
+				foldAddr, foldFound = syms[i].Value, true
+			}
+		}
+		return true
+	}
+
+	exports, err := f.cachedExports()
 	if err != nil {
 		if err != ErrMachODyldInfoNotFound {
+			if !symtabFold() {
+				return f.findSymbolAddressStale(symbol)
+			}
 			if foldFound {
 				// the previous code returned the symbol-table match before
 				// ever looking at the exports
@@ -5034,12 +5107,30 @@ func (f *File) FindSymbolAddress(symbol string) (uint64, error) {
 			return 0, fmt.Errorf("failed to get exports: %v", err)
 		}
 	}
-	for _, sym := range exports {
-		if sym.Name == symbol {
-			return sym.Address, nil
+	expIndex, expIndexed := f.exportsNameIndex(exports)
+	if expIndexed {
+		if i, ok := expIndex.exact[symbol]; ok {
+			return exports[i].Address, nil
 		}
-		if !foldFound && strings.EqualFold(sym.Name, symbol) {
-			foldAddr, foldFound = sym.Address, true
+		if !symtabFold() {
+			return f.findSymbolAddressStale(symbol)
+		}
+		if !foldFound {
+			if i, ok := expIndex.foldFirst(symbol); ok {
+				foldAddr, foldFound = exports[i].Address, true
+			}
+		}
+	} else {
+		if !symtabFold() {
+			return f.findSymbolAddressStale(symbol)
+		}
+		for _, sym := range exports {
+			if sym.Name == symbol {
+				return sym.Address, nil
+			}
+			if !foldFound && strings.EqualFold(sym.Name, symbol) {
+				foldAddr, foldFound = sym.Address, true
+			}
 		}
 	}
 	if foldFound {
@@ -5048,14 +5139,31 @@ func (f *File) FindSymbolAddress(symbol string) (uint64, error) {
 	return 0, fmt.Errorf("symbol not found in macho symtab")
 }
 
+// findSymbolAddressStale answers a lookup whose index hit did not match the
+// live symbol table (an element was edited in place).
+func (f *File) findSymbolAddressStale(symbol string) (uint64, error) {
+	f.resetSymbolIndexes()
+	return f.findSymbolAddressLinear(symbol)
+}
+
+// FindAddressSymbols returns the symbols at addr: the symbol table entries in
+// table order followed by the LC_DYLD_EXPORTS_TRIE exports in trie order.
+// findAddressSymbolsLinear is the plain scan that defines the result.
 func (f *File) FindAddressSymbols(addr uint64) ([]Symbol, error) {
 	if f.Symtab == nil {
 		return nil, &FormatError{0, "missing symbol table", nil}
 	}
 	var syms []Symbol
-	for _, sym := range f.Symtab.Syms {
-		if sym.Value == addr {
-			syms = append(syms, sym)
+	all := f.Symtab.Syms
+	if order, ok := f.symtabAddrIndex(all); ok {
+		for _, i := range valueRange(order, func(i int) uint64 { return all[i].Value }, addr) {
+			syms = append(syms, all[i])
+		}
+	} else {
+		for _, sym := range all {
+			if sym.Value == addr {
+				syms = append(syms, sym)
+			}
 		}
 	}
 	if f.DyldExportsTrie() != nil && f.DyldExportsTrie().Size > 0 {
@@ -5063,9 +5171,15 @@ func (f *File) FindAddressSymbols(addr uint64) ([]Symbol, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get exports: %v", err)
 		}
-		for _, sym := range exports {
-			if sym.Address == addr {
-				syms = append(syms, Symbol{Name: sym.Name, Value: sym.Address})
+		if order, ok := f.dyldExportsAddrIndex(exports); ok {
+			for _, i := range valueRange(order, func(i int) uint64 { return exports[i].Address }, addr) {
+				syms = append(syms, Symbol{Name: exports[i].Name, Value: exports[i].Address})
+			}
+		} else {
+			for _, sym := range exports {
+				if sym.Address == addr {
+					syms = append(syms, Symbol{Name: sym.Name, Value: sym.Address})
+				}
 			}
 		}
 	}
