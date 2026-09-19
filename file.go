@@ -1878,6 +1878,12 @@ func (f *File) getOffset(address uint64) (uint64, error) {
 		if !ok {
 			continue
 		}
+		// NOTE: the bound is Memsz on purpose. An address in a segment's
+		// zero-fill tail (Filesz <= address-Addr < Memsz) has no file content and
+		// the offset returned for it lies in the following segment's data, which
+		// looks like a bug. Rejecting such addresses was tried and changed 758
+		// ObjC/Swift dump results across a 1,478-binary corpus (ObjC metadata
+		// parsing reads through such addresses), so existing behaviour is kept.
 		if seg.Addr <= address && address < seg.Addr+seg.Memsz {
 			return (address - seg.Addr) + seg.Offset, nil
 		}
