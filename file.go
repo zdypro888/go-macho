@@ -1904,12 +1904,15 @@ func (f *File) getOffset(address uint64) (uint64, error) {
 		if !ok {
 			continue
 		}
-		// NOTE: the bound is Memsz on purpose. An address in a segment's
-		// zero-fill tail (Filesz <= address-Addr < Memsz) has no file content and
-		// the offset returned for it lies in the following segment's data, which
-		// looks like a bug. Rejecting such addresses was tried and changed 758
-		// ObjC/Swift dump results across a 1,478-binary corpus (ObjC metadata
-		// parsing reads through such addresses), so existing behaviour is kept.
+		// NOTE: the bound is Memsz on purpose. __PAGEZERO is a segment with
+		// addr 0, filesz 0, memsz 4 GiB and file offset 0, so through it any value
+		// below 4 GiB maps to the file offset of the same value. Chained-fixup
+		// targets are frequently image-relative offsets rather than full
+		// addresses, and the ObjC/Swift parsers read through exactly this path.
+		// Bounding by Filesz instead (tried) changed 758 ObjC/Swift dump results
+		// over a 1,478-binary corpus. The same bound also lets an address in a
+		// data segment's zero-fill tail map into the following segment's bytes;
+		// that case is left as is because the two cannot be told apart here.
 		if seg.Addr <= address && address < seg.Addr+seg.Memsz {
 			return (address - seg.Addr) + seg.Offset, nil
 		}
