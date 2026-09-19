@@ -24,9 +24,10 @@ import (
 //     matches the recorded identity, so the index is rebuilt instead of reused.
 //     The index keeps a pointer into the old backing array, so that address
 //     cannot be recycled for a different slice while the index is alive.
-//   - A hit is re-checked against the live element before it is returned. If
-//     somebody edited an element in place the check fails, the indexes are
-//     dropped and the linear reference scan answers instead.
+//   - Name snapshots are checked against every live name before reuse. Address
+//     orders are checked before binary search. Hit-only checks cannot detect an
+//     earlier duplicate or a new match. Public in-place edits require O(n)
+//     validation; there is no writer-controlled generation counter here.
 //   - Building an index costs as much as a number of linear scans of the same
 //     table (roughly 8 for names, 25 for addresses, 60 for binds; see
 //     BenchmarkSymbolIndexBuild), so that many lookups against a table are
@@ -66,6 +67,7 @@ func idOf[T any](s []T) sliceID[T] {
 type nameIndex struct {
 	n     int
 	name  func(i int) string
+	names []string // immutable snapshot: callers may edit exported symbols in place
 	exact map[string]int32
 
 	foldOnce sync.Once
@@ -73,9 +75,10 @@ type nameIndex struct {
 }
 
 func buildNameIndex(n int, name func(i int) string) *nameIndex {
-	ix := &nameIndex{n: n, name: name, exact: make(map[string]int32, n)}
+	ix := &nameIndex{n: n, name: name, names: make([]string, n), exact: make(map[string]int32, n)}
 	for i := 0; i < n; i++ {
 		s := name(i)
+		ix.names[i] = s
 		if _, ok := ix.exact[s]; !ok {
 			ix.exact[s] = int32(i)
 		}
@@ -83,12 +86,23 @@ func buildNameIndex(n int, name func(i int) string) *nameIndex {
 	return ix
 }
 
+// A hit-only check misses renamed symbols and earlier duplicates. With public
+// mutable slices, exact invalidation requires checking every indexed name.
+func (ix *nameIndex) matchesNames() bool {
+	for i, name := range ix.names {
+		if ix.name(i) != name {
+			return false
+		}
+	}
+	return true
+}
+
 // foldFirst returns the first position whose name is EqualFold to symbol.
 func (ix *nameIndex) foldFirst(symbol string) (int, bool) {
 	ix.foldOnce.Do(func() {
 		fold := make(map[string]int32, len(ix.exact))
 		for i := 0; i < ix.n; i++ {
-			k := foldKey(ix.name(i))
+			k := foldKey(ix.names[i])
 			if _, ok := fold[k]; !ok {
 				fold[k] = int32(i)
 			}
@@ -267,9 +281,14 @@ func (f *File) resetSymbolIndexes() {
 func (f *File) symtabNameIndex(syms []Symbol) (*nameIndex, bool) {
 	f.symIndexMu.Lock()
 	defer f.symIndexMu.Unlock()
-	return f.symIdx.symNames.get(syms, nameIndexAfterLookups, func() *nameIndex {
+	ix, ok := f.symIdx.symNames.get(syms, nameIndexAfterLookups, func() *nameIndex {
 		return buildNameIndex(len(syms), func(i int) string { return syms[i].Name })
 	})
+	if ok && !ix.matchesNames() {
+		f.symIdx.symNames = lazyIndex[Symbol, *nameIndex]{}
+		return nil, false
+	}
+	return ix, ok
 }
 
 func (f *File) symtabAddrIndex(syms []Symbol) ([]int32, bool) {
@@ -320,13 +339,32 @@ func (f *File) cachedExports() ([]trie.TrieExport, error) {
 func (f *File) exportsNameIndex(exports []trie.TrieExport) (*nameIndex, bool) {
 	f.symIndexMu.Lock()
 	defer f.symIndexMu.Unlock()
-	return f.symIdx.exportNames.get(exports, nameIndexAfterLookups, func() *nameIndex {
+	ix, ok := f.symIdx.exportNames.get(exports, nameIndexAfterLookups, func() *nameIndex {
 		return buildNameIndex(len(exports), func(i int) string { return exports[i].Name })
 	})
+	if ok && !ix.matchesNames() {
+		f.symIdx.exportNames = lazyIndex[trie.TrieExport, *nameIndex]{}
+		return nil, false
+	}
+	return ix, ok
 }
 
 // valueRange returns the sub-slice of order whose positions carry value.
 func valueRange(order []int32, value func(i int) uint64, addr uint64) []int32 {
+	// Values are exported and can change between calls. Binary search requires
+	// both sorted values and original-table ordering for duplicates.
+	for j := 1; j < len(order); j++ {
+		prev, cur := value(int(order[j-1])), value(int(order[j]))
+		if cur < prev || (cur == prev && order[j] < order[j-1]) {
+			var matches []int32
+			for i := range order {
+				if value(i) == addr {
+					matches = append(matches, int32(i))
+				}
+			}
+			return matches
+		}
+	}
 	lo := sort.Search(len(order), func(j int) bool { return value(int(order[j])) >= addr })
 	hi := lo
 	for hi < len(order) && value(int(order[hi])) == addr {
@@ -337,23 +375,40 @@ func valueRange(order []int32, value func(i int) uint64, addr uint64) []int32 {
 
 // bindNameIndex maps a bind's slot address (Start+SegOffset) to the FIRST bind
 // at that address. Guarded by fixupsMu, like the f.binds it is built from.
-type bindNameIndex = lazyIndex[types.Bind, map[uint64]int32]
+type bindSlots struct {
+	first map[uint64]int32
+	slots []uint64
+}
+
+type bindNameIndex = lazyIndex[types.Bind, bindSlots]
 
 // bindAtLocked returns the first bind whose slot address is pointer. It must be
 // called with fixupsMu held.
 func (f *File) bindAtLocked(binds types.Binds, pointer uint64) (string, bool) {
-	index, ok := f.bindNameIdx.get(binds, bindIndexAfterLookups, func() map[uint64]int32 {
+	index, ok := f.bindNameIdx.get(binds, bindIndexAfterLookups, func() bindSlots {
 		m := make(map[uint64]int32, len(binds))
+		slots := make([]uint64, len(binds))
 		for i := range binds {
 			addr := binds[i].Start + binds[i].SegOffset
+			slots[i] = addr
 			if _, ok := m[addr]; !ok {
 				m[addr] = int32(i)
 			}
 		}
-		return m
+		return bindSlots{first: m, slots: slots}
 	})
+	// GetBindInfo 暴露可变切片；仅检查命中项会漏掉新地址或更早的重复项。
 	if ok {
-		if i, ok := index[pointer]; ok {
+		for i := range binds {
+			if binds[i].Start+binds[i].SegOffset != index.slots[i] {
+				f.bindNameIdx = bindNameIndex{}
+				ok = false
+				break
+			}
+		}
+	}
+	if ok {
+		if i, ok := index.first[pointer]; ok {
 			if b := &binds[i]; b.Start+b.SegOffset == pointer {
 				return b.Name, true
 			}

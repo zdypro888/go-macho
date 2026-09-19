@@ -54,10 +54,9 @@ import (
 // fields such as Symtab, Loads or Sections. Call them before handing the File
 // to other goroutines, or serialise them with every reader.
 //
-// Symtab (and Symtab.Syms) may be replaced at any time. Do not edit the
-// elements of Symtab.Syms in place after the first symbol lookup: the lookup
-// indexes behind FindSymbolAddress and FindAddressSymbols are tied to the
-// slice, not to its contents. ResetFixupsCache drops those indexes too.
+// Symtab (and Symtab.Syms) may be replaced or edited between calls, serialized
+// with every reader. Lookup indexes validate the live names/address ordering
+// before reuse; ResetFixupsCache also drops those indexes.
 type File struct {
 	FileTOC
 
