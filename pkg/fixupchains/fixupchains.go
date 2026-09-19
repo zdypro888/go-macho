@@ -1528,6 +1528,12 @@ func (dcf *DyldChainedFixups) GetFixupAtOffset(offset uint64) (Fixup, error) {
 		return nil, ErrNoFixupAtOffset
 	}
 
+	// Fast path: one read and one walk per page, shared by all later lookups.
+	// Anything unusual about the page is left to the walker below.
+	if fixup, err, handled := dcf.cachedFixupInPage(start, pageStart, pageContentStart, offsetInPage); handled {
+		return fixup, err
+	}
+
 	chainStarts, err := chainStartsForPage(start, pageStart)
 	if err != nil {
 		return nil, err
@@ -1571,40 +1577,8 @@ func (dcf *DyldChainedFixups) checkChainForOffset(start *DyldChainedStarts, page
 		}
 
 		// Calculate next offset based on pointer format
-		var next uint64
-		switch start.PointerFormat {
-		case DYLD_CHAINED_PTR_32:
-			next = Generic32Next(uint32(raw))
-		case DYLD_CHAINED_PTR_32_CACHE:
-			next = uint64(DyldChainedPtr32CacheRebase{Pointer: uint32(raw)}.Next())
-		case DYLD_CHAINED_PTR_32_FIRMWARE:
-			next = uint64(DyldChainedPtr32FirmwareRebase{Pointer: uint32(raw)}.Next())
-		case DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_64_KERNEL_CACHE, DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE:
-			next = Generic64Next(raw)
-		case DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_ARM64E_USERLAND, DYLD_CHAINED_PTR_ARM64E_USERLAND24,
-			DYLD_CHAINED_PTR_ARM64E_KERNEL, DYLD_CHAINED_PTR_ARM64E_FIRMWARE:
-			next = DcpArm64eNext(raw)
-		case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
-			if raw>>63 != 0 {
-				next = DyldChainedPtrArm64eSharedCacheAuthRebase{Pointer: raw}.Next()
-			} else {
-				next = DyldChainedPtrArm64eSharedCacheRebase{Pointer: raw}.Next()
-			}
-		case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3:
-			if raw>>63 != 0 {
-				next = DyldChainedPtrArm64eSharedCacheV3AuthRebase{Pointer: raw}.Next()
-			} else {
-				next = DyldChainedPtrArm64eSharedCacheV3Rebase{Pointer: raw}.Next()
-			}
-		case DYLD_CHAINED_PTR_SHARED_CACHE_V2:
-			next = DyldChainedPtrSharedCacheV2Rebase{Pointer: raw}.Next()
-		case DYLD_CHAINED_PTR_ARM64E_SEGMENTED:
-			if raw>>63 != 0 {
-				next = DyldChainedPtrArm64eAuthSegmentedRebase{Pointer: raw}.Next()
-			} else {
-				next = DyldChainedPtrArm64eSegmentedRebase{Pointer: raw}.Next()
-			}
-		default:
+		next, ok := chainNext(start.PointerFormat, raw)
+		if !ok {
 			return false, nil, fmt.Errorf("unsupported pointer format %d", start.PointerFormat)
 		}
 
@@ -1631,12 +1605,59 @@ func (dcf *DyldChainedFixups) checkChainForOffset(start *DyldChainedStarts, page
 	return false, nil, nil
 }
 
+// chainNext extracts the "next" field (in stride units) from a raw chained
+// pointer. It reports false for formats whose chains cannot be walked.
+func chainNext(format DCPtrKind, raw uint64) (uint64, bool) {
+	var next uint64
+	switch format {
+	case DYLD_CHAINED_PTR_32:
+		next = Generic32Next(uint32(raw))
+	case DYLD_CHAINED_PTR_32_CACHE:
+		next = uint64(DyldChainedPtr32CacheRebase{Pointer: uint32(raw)}.Next())
+	case DYLD_CHAINED_PTR_32_FIRMWARE:
+		next = uint64(DyldChainedPtr32FirmwareRebase{Pointer: uint32(raw)}.Next())
+	case DYLD_CHAINED_PTR_64, DYLD_CHAINED_PTR_64_OFFSET, DYLD_CHAINED_PTR_64_KERNEL_CACHE, DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE:
+		next = Generic64Next(raw)
+	case DYLD_CHAINED_PTR_ARM64E, DYLD_CHAINED_PTR_ARM64E_USERLAND, DYLD_CHAINED_PTR_ARM64E_USERLAND24,
+		DYLD_CHAINED_PTR_ARM64E_KERNEL, DYLD_CHAINED_PTR_ARM64E_FIRMWARE:
+		next = DcpArm64eNext(raw)
+	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+		if raw>>63 != 0 {
+			next = DyldChainedPtrArm64eSharedCacheAuthRebase{Pointer: raw}.Next()
+		} else {
+			next = DyldChainedPtrArm64eSharedCacheRebase{Pointer: raw}.Next()
+		}
+	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE_V3:
+		if raw>>63 != 0 {
+			next = DyldChainedPtrArm64eSharedCacheV3AuthRebase{Pointer: raw}.Next()
+		} else {
+			next = DyldChainedPtrArm64eSharedCacheV3Rebase{Pointer: raw}.Next()
+		}
+	case DYLD_CHAINED_PTR_SHARED_CACHE_V2:
+		next = DyldChainedPtrSharedCacheV2Rebase{Pointer: raw}.Next()
+	case DYLD_CHAINED_PTR_ARM64E_SEGMENTED:
+		if raw>>63 != 0 {
+			next = DyldChainedPtrArm64eAuthSegmentedRebase{Pointer: raw}.Next()
+		} else {
+			next = DyldChainedPtrArm64eSegmentedRebase{Pointer: raw}.Next()
+		}
+	default:
+		return 0, false
+	}
+	return next, true
+}
+
 // readAndDecodeFixup reads the raw pointer at the given location and decodes it into the appropriate Fixup type.
 func (dcf *DyldChainedFixups) readAndDecodeFixup(format DCPtrKind, fixupLocation uint64) (Fixup, error) {
 	raw, err := dcf.readRawPointer(format, fixupLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read raw pointer: %w", err)
 	}
+	return dcf.decodeFixup(format, raw, fixupLocation)
+}
+
+// decodeFixup decodes raw pointer bits already read from fixupLocation.
+func (dcf *DyldChainedFixups) decodeFixup(format DCPtrKind, raw, fixupLocation uint64) (Fixup, error) {
 	if err := dcf.validateBindOrdinal(format, raw, fixupLocation); err != nil {
 		return nil, err
 	}

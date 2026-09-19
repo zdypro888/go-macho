@@ -32,6 +32,12 @@ type DyldChainedFixups struct {
 	kernelCacheLevelZeroSegmentSet bool
 	sharedCacheBase                uint64
 	sharedCacheBaseSet             bool
+
+	// pageCacheMu guards pageCache only. It is never held while calling out
+	// (not even into the reader) and is independent of parseMu.
+	pageCacheMu      sync.RWMutex
+	pageCache        map[uint64]*chainPage // keyed by the page's file offset
+	disablePageCache bool                  // tests: force the link-by-link walker
 }
 
 type Fixup interface {

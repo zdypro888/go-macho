@@ -1871,7 +1871,13 @@ func (f *File) GetOffset(address uint64) (uint64, error) {
 }
 
 func (f *File) getOffset(address uint64) (uint64, error) {
-	for _, seg := range f.Segments() {
+	// Walks Loads directly (same order and result as ranging over Segments())
+	// so this hot path does not allocate a segment slice per lookup.
+	for _, l := range f.Loads {
+		seg, ok := l.(*Segment)
+		if !ok {
+			continue
+		}
 		if seg.Addr <= address && address < seg.Addr+seg.Memsz {
 			return (address - seg.Addr) + seg.Offset, nil
 		}
@@ -1902,7 +1908,11 @@ func (f *File) GetVMAddress(offset uint64) (uint64, error) {
 }
 
 func (f *File) getVMAddress(offset uint64) (uint64, error) {
-	for _, seg := range f.Segments() {
+	for _, l := range f.Loads {
+		seg, ok := l.(*Segment)
+		if !ok {
+			continue
+		}
 		if seg.Offset <= offset && offset < seg.Offset+seg.Filesz {
 			return (offset - seg.Offset) + seg.Addr, nil
 		}

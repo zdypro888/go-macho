@@ -483,6 +483,10 @@ func replaceLast(s, old, new string) string {
 	return s
 }
 
+// ivarArrayOrBitfieldRE is compiled once; it used to be recompiled for every
+// ivar dumped (a *regexp.Regexp is safe for concurrent use).
+var ivarArrayOrBitfieldRE = regexp.MustCompile(`x(\s?)(\[[0-9]+\]|:[0-9]+) $`)
+
 func (i *Ivar) dump(verbose, addrs bool) string {
 	var addr string
 	if addrs {
@@ -490,7 +494,7 @@ func (i *Ivar) dump(verbose, addrs bool) string {
 	}
 	if verbose {
 		ivtype := getIVarType(i.Type)
-		if regexp.MustCompile(`x(\s?)(\[[0-9]+\]|:[0-9]+) $`).MatchString(ivtype) { // array|bitfield special case
+		if ivarArrayOrBitfieldRE.MatchString(ivtype) { // array|bitfield special case
 			ivtype = strings.TrimSpace(replaceLast(ivtype, "x", i.Name))
 			return fmt.Sprintf("%s;%s", ivtype, addr)
 		}
