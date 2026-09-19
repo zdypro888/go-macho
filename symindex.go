@@ -228,7 +228,7 @@ type exportsSource struct {
 
 func (f *File) exportsSource() exportsSource {
 	src := exportsSource{
-		parsedExportsTrie: idOf(f.exp),
+		parsedExportsTrie: idOf(f.parsedDyldExports()),
 		base:              f.GetBaseAddress(),
 		initialized:       true,
 	}

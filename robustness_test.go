@@ -173,7 +173,7 @@ func TestSwiftCountsFromImageAreBounded(t *testing.T) {
 				file := newSwiftFixtureFile(t, base, data)
 				file.swift = make(map[uint64]any)
 				bounded(t, func() {
-					if field, err := file.readField(r, base); err == nil {
+					if field, err := file.readField(file.cr, r, base); err == nil {
 						t.Errorf("readField accepted NumFields=%#x: %v", field.NumFields, field)
 					}
 				})
@@ -188,7 +188,7 @@ func TestSwiftCountsFromImageAreBounded(t *testing.T) {
 		file := newSwiftFixtureFile(t, base, data)
 		file.swift = make(map[uint64]any)
 		bounded(t, func() {
-			if _, err := file.parseProtocol(file.cr, &swift.Type{Address: base}); err == nil {
+			if _, err := file.parseProtocol(file.cr, file.cr, &swift.Type{Address: base}); err == nil {
 				t.Error("parseProtocol accepted NumRequirementsInSignature=0x6d000000")
 			}
 		})
@@ -206,7 +206,7 @@ func TestSwiftCountsFromImageAreBounded(t *testing.T) {
 		copy(data[52:], "cde\x00")
 		file := newSwiftFixtureFile(t, base, data)
 		file.swift = make(map[uint64]any)
-		field, err := file.readField(bytes.NewReader(data), base)
+		field, err := file.readField(file.cr, bytes.NewReader(data), base)
 		if err != nil {
 			t.Fatalf("readField: %v", err)
 		}
@@ -235,7 +235,7 @@ func TestGetContextDescParentChain(t *testing.T) {
 		put(data, 16, swift.CDKindClass, 16, -1)
 		file := newSwiftFixtureFile(t, base, data)
 		bounded(t, func() {
-			if ctx, err := file.getContextDesc(base + 16); err == nil {
+			if ctx, err := file.getContextDesc(file.cr, base+16); err == nil {
 				t.Errorf("cyclic parent chain was accepted: %#v", ctx)
 			} else if !strings.Contains(err.Error(), "cycle") {
 				t.Errorf("unexpected error: %v", err)
@@ -249,7 +249,7 @@ func TestGetContextDescParentChain(t *testing.T) {
 		put(data, 16, swift.CDKindClass, 0, -1)
 		file := newSwiftFixtureFile(t, base, data)
 		bounded(t, func() {
-			if ctx, err := file.getContextDesc(base); err == nil {
+			if ctx, err := file.getContextDesc(file.cr, base); err == nil {
 				t.Errorf("cyclic parent chain was accepted: %#v", ctx)
 			}
 		})
@@ -263,7 +263,7 @@ func TestGetContextDescParentChain(t *testing.T) {
 		}
 		file := newSwiftFixtureFile(t, base, data)
 		bounded(t, func() {
-			if _, err := file.getContextDesc(base + 12); err == nil {
+			if _, err := file.getContextDesc(file.cr, base+12); err == nil {
 				t.Error("absurdly deep parent chain was accepted")
 			}
 		})
@@ -280,7 +280,7 @@ func TestGetContextDescParentChain(t *testing.T) {
 		copy(data[74:], "Inner\x00")
 		copy(data[80:], "Leaf\x00")
 		file := newSwiftFixtureFile(t, base, data)
-		ctx, err := file.getContextDesc(base + 48)
+		ctx, err := file.getContextDesc(file.cr, base+48)
 		if err != nil {
 			t.Fatalf("getContextDesc: %v", err)
 		}

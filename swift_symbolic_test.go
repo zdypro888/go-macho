@@ -59,7 +59,7 @@ func TestSwiftObjCProtocolSymbolicReferenceUsesFlatMangledName(t *testing.T) {
 
 	file := newSwiftFixtureFile(t, base, data)
 
-	name, err := file.objcProtocolSymbolicName(base)
+	name, err := file.objcProtocolSymbolicName(file.cr, base)
 	if err != nil {
 		t.Fatalf("objcProtocolSymbolicName: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSwiftObjCProtocolSymbolicReferenceUsesFlatMangledName(t *testing.T) {
 		t.Fatalf("protocol name = %q, want NSCopying", name)
 	}
 
-	typeref, err := file.makeSymbolicMangledNameStringRef(base + 32)
+	typeref, err := file.makeSymbolicMangledNameStringRef(file.cr, base+32)
 	if err != nil {
 		t.Fatalf("makeSymbolicMangledNameStringRef: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestGetContextDescPropagatesImageReadFailures(t *testing.T) {
 
 	t.Run("truncated in-range descriptor", func(t *testing.T) {
 		const descriptorTail = uint64(60) // only four of the required eight bytes remain
-		ctx, err := file.getContextDesc(base + descriptorTail)
+		ctx, err := file.getContextDesc(file.cr, base+descriptorTail)
 		if err == nil {
 			t.Fatalf("getContextDesc returned ctx %#v without reporting a truncated descriptor", ctx)
 		}
@@ -103,7 +103,7 @@ func TestGetContextDescPropagatesImageReadFailures(t *testing.T) {
 
 	t.Run("unreadable indirect slot", func(t *testing.T) {
 		indirect := (base + uint64(len(data)) + 2) | 1
-		ctx, err := file.getContextDesc(indirect)
+		ctx, err := file.getContextDesc(file.cr, indirect)
 		if err == nil {
 			t.Fatalf("getContextDesc returned ctx %#v without reporting an unreadable indirect slot", ctx)
 		}

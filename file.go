@@ -32,28 +32,32 @@ import (
 
 // A File represents an open Mach-O file.
 //
-// A File must not be used from multiple goroutines at the same time. The
-// parsing methods (GetObjCClasses, GetSwiftTypes, GetFunctions, GetCStrings,
-// ...) all read through one shared seeking reader, so two of them running
-// concurrently - even two different ones, such as GetSwiftTypes and
-// GetObjCClasses - move each other's read position and return garbage or
-// spurious errors. The Swift caches are plain maps as well. The locks inside
-// File (mu, fixupsMu, lazyLoadMu, symIndexMu) only keep the individual caches
-// they guard consistent; they do not make File safe for concurrent use.
-// Callers that need parallelism must serialize access to a File themselves or
-// open one File per goroutine.
+// The read-only parsing methods (GetObjCClasses, GetSwiftTypes,
+// GetSwiftProtocolConformances, DyldExports, GetDyldInfo, GetBindInfo,
+// GetCStrings, GetFunctions, ...) are safe to call concurrently on one File.
+// Every public call that has to read sequentially does so through its own
+// cursor (see newReader), and the lazily built caches (ObjC and Swift
+// objects, fixups, binds and rebases, export tries, function starts, symbol
+// and bind lookup indexes, the Swift context memo) are each guarded by a
+// lock. This holds for
+// a File opened with Open or NewFile over an io.ReaderAt, and for a
+// FileConfig.SectionReader/CacheReader that implements types.ReaderCloner;
+// with a reader that cannot be cloned, the parsers fall back to sharing that
+// reader and its position, and the File is then only safe for one goroutine
+// at a time.
+//
+// Methods that modify the File are not safe to run concurrently with anything
+// else on the same File: Export, CodeSign and SaveBuffer (which rewrite Loads,
+// Symtab and the LINKEDIT data), AddLoad and RemoveLoad (Loads), LoadExt,
+// SetSharedCacheBaseAddress and the kernel-cache base setters,
+// ResetFixupsCache, SetSwiftAutoDemangle, and direct assignments to exported
+// fields such as Symtab, Loads or Sections. Call them before handing the File
+// to other goroutines, or serialise them with every reader.
 //
 // Symtab (and Symtab.Syms) may be replaced at any time. Do not edit the
 // elements of Symtab.Syms in place after the first symbol lookup: the lookup
 // indexes behind FindSymbolAddress and FindAddressSymbols are tied to the
 // slice, not to its contents. ResetFixupsCache drops those indexes too.
-//
-// A File is not safe for concurrent use. The ObjC and Swift parsers, the
-// export/bind walkers and the section readers all share one seeking reader
-// (a Seek followed by sequential Reads), so two goroutines calling methods
-// such as GetObjCClasses and GetSwiftTypes at the same time race on its
-// position and can return wrong results. Serialise calls on one File, or
-// open the file once per goroutine.
 type File struct {
 	FileTOC
 
@@ -63,12 +67,17 @@ type File struct {
 	vma                   *types.VMAddrConverter
 	customVMAddrConverter bool
 	dcf                   *fixupchains.DyldChainedFixups
-	exp                   []trie.TrieExport
-	exptrieData           []byte
-	binds                 types.Binds
-	bindsDone             bool
-	rebases               []types.Rebase
-	rebasesDone           bool
+
+	// expMu guards exp and exptrieData, the lazily parsed LC_DYLD_EXPORTS_TRIE.
+	// Both are immutable once published. Leaf lock.
+	expMu       sync.Mutex
+	exp         []trie.TrieExport
+	exptrieData []byte
+
+	binds       types.Binds
+	bindsDone   bool
+	rebases     []types.Rebase
+	rebasesDone bool
 
 	threadedRebases []types.Rebase
 
@@ -88,13 +97,22 @@ type File struct {
 	symIndexMu sync.Mutex
 	symIdx     symbolIndexes
 
+	// functionsMu guards FileTOC.functions, the list GetFunctions and
+	// GenerateFunctionStarts cache. Leaf lock.
+	functionsMu sync.Mutex
+
 	// swiftCtxMu guards swiftCtx, getContextDesc's per-call memo. Leaf lock.
 	swiftCtxMu sync.Mutex
 	swiftCtx   swiftContextMemo
 
-	objc   map[uint64]any
-	swift  map[uint64]any
-	ledata *bytes.Buffer // tmp storage of linkedit data
+	objc map[uint64]any // guarded by mu (PutObjC/GetObjC)
+
+	// swiftMu guards swift, the cache of parsed Swift types and field
+	// descriptors keyed by address (see putSwift/getSwift). Leaf lock.
+	swiftMu sync.Mutex
+	swift   map[uint64]any
+
+	ledata *bytes.Buffer // tmp storage of linkedit data; written by Export/CodeSign only
 
 	objcRuntimeOnce          sync.Once
 	objcHasNonFragileRuntime bool
@@ -114,7 +132,12 @@ type File struct {
 	kernelCacheLevelZeroSegmentSet           bool
 	swiftAutoDemangle                        bool
 
-	mu     sync.Mutex
+	mu sync.Mutex
+	// sr reads the Mach-O by file offset, cr by file offset or virtual
+	// address (the cache reader of a dyld shared cache image). Both are
+	// shared by every goroutine, so File methods only use their position-free
+	// ReadAt/ReadAtAddr; anything that seeks goes through a per-call cursor
+	// from newReader.
 	sr     types.MachoReader
 	cr     types.MachoReader
 	closer io.Closer
@@ -188,7 +211,13 @@ func loadInSlice(c types.LoadCmd, list []types.LoadCmd) bool {
 // resolved=false delegates to the Mach-O file's ordinary fixup/conversion path.
 type PointerResolver func(slotVMAddr, rawPointer uint64) (target uint64, resolved bool, err error)
 
-// FileConfig is a MachO file config object
+// FileConfig is a MachO file config object.
+//
+// SectionReader (file-offset reads) and CacheReader (virtual-address reads)
+// should implement types.ReaderCloner: the File then gives every public
+// parsing call a cursor of its own and is safe for concurrent use. A reader
+// without Clone is shared, position included, and the File must then be used
+// by one goroutine at a time.
 type FileConfig struct {
 	Offset               int64
 	LoadIncluding        []types.LoadCmd
@@ -228,6 +257,28 @@ func (f *File) Close() error {
 	return err
 }
 
+// cloneReader returns a private cursor over r's data when r implements
+// types.ReaderCloner, and r itself otherwise.
+func cloneReader(r types.MachoReader) types.MachoReader {
+	if c, ok := r.(types.ReaderCloner); ok {
+		return c.Clone()
+	}
+	return r
+}
+
+// newReader returns the cursor a public parsing call reads sequentially
+// through: a clone of the cache reader (types.CustomSectionReader for a File
+// opened over an io.ReaderAt, or whatever FileConfig.CacheReader/SectionReader
+// supplied) that shares the underlying data and address conversion but has a
+// position of its own. It is passed explicitly to every helper of that call,
+// so concurrent calls never move each other's position.
+//
+// When the configured reader does not implement types.ReaderCloner the shared
+// reader is returned instead, and the File is not safe for concurrent use.
+func (f *File) newReader() types.MachoReader {
+	return cloneReader(f.cr)
+}
+
 // NewFile creates a new File for accessing a Mach-O binary in an underlying reader.
 // The Mach-O binary is expected to start at position 0 in the ReaderAt.
 func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
@@ -247,11 +298,12 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 	}
 	f.sr = types.NewCustomSectionReader(r, f.vma, 0, 1<<63-1)
 	f.cr = f.sr
+	var headerOffset int64
 
 	if config != nil {
 		if config[0].SectionReader != nil {
 			f.sr = config[0].SectionReader
-			f.sr.Seek(config[0].Offset, io.SeekStart)
+			headerOffset = config[0].Offset
 			f.cr = f.sr
 		}
 		if config[0].CacheReader != nil {
@@ -290,8 +342,12 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 		return nil, &FormatError{0, "invalid magic number", nil}
 	}
 
-	// Read entire file header.
-	if err := binary.Read(f.sr, f.ByteOrder, &f.FileHeader); err != nil {
+	// Read entire file header. A caller-supplied SectionReader may be shared
+	// with other Files (GetFileSetFileByName hands the parent's reader to every
+	// child), so read through a private cursor when the reader offers one.
+	hr := cloneReader(f.sr)
+	hr.Seek(headerOffset, io.SeekStart)
+	if err := binary.Read(hr, f.ByteOrder, &f.FileHeader); err != nil {
 		return nil, fmt.Errorf("failed to parse header: %v", err)
 	}
 
@@ -3325,7 +3381,8 @@ func (f *File) resolveFunctionVariantSymbolsIfParsed(fv *FunctionVariants) {
 	if fv == nil || fv.Data == nil || len(fv.Data.Tables) == 0 {
 		return
 	}
-	if f.Symtab == nil && f.exp == nil {
+	parsedExports := f.parsedDyldExports()
+	if f.Symtab == nil && parsedExports == nil {
 		return
 	}
 
@@ -3338,8 +3395,8 @@ func (f *File) resolveFunctionVariantSymbolsIfParsed(fv *FunctionVariants) {
 			}
 		}
 	}
-	if f.exp != nil {
-		for _, exp := range f.exp {
+	if parsedExports != nil {
+		for _, exp := range parsedExports {
 			if _, ok := addrToName[exp.Address]; !ok {
 				addrToName[exp.Address] = exp.Name
 			}
@@ -3367,9 +3424,28 @@ func (f *File) resolveFunctionVariantSymbolsIfParsed(fv *FunctionVariants) {
 	}
 }
 
+// cachedFunctions returns the function list GetFunctions or
+// GenerateFunctionStarts published, if any.
+func (f *File) cachedFunctions() []types.Function {
+	f.functionsMu.Lock()
+	defer f.functionsMu.Unlock()
+	return f.functions
+}
+
+// publishFunctions caches funcs unless another call published a list first,
+// and returns the list every caller now sees.
+func (f *File) publishFunctions(funcs []types.Function) []types.Function {
+	f.functionsMu.Lock()
+	defer f.functionsMu.Unlock()
+	if len(f.functions) == 0 {
+		f.functions = funcs
+	}
+	return f.functions
+}
+
 func (f *File) GenerateFunctionStarts() ([]types.Function, error) {
-	if len(f.functions) > 0 {
-		return f.functions, nil
+	if funcs := f.cachedFunctions(); len(funcs) > 0 {
+		return funcs, nil
 	}
 
 	if !f.isArm64e() {
@@ -3412,16 +3488,14 @@ func (f *File) GenerateFunctionStarts() ([]types.Function, error) {
 	}
 	funcs[len(funcs)-1].EndAddr = Align(text.Addr+text.Size, uint64(text.Align))
 
-	f.functions = funcs
-
-	return funcs, nil
+	return f.publishFunctions(funcs), nil
 }
 
 // GetFunctions returns the function array, or nil if none exists.
 func (f *File) GetFunctions(data ...byte) []types.Function {
 
-	if len(f.functions) > 0 {
-		return f.functions
+	if funcs := f.cachedFunctions(); len(funcs) > 0 {
+		return funcs
 	}
 
 	var funcs []types.Function
@@ -3481,9 +3555,7 @@ func (f *File) GetFunctions(data ...byte) []types.Function {
 	}
 
 	// cache parsed functions
-	f.functions = funcs
-
-	return funcs
+	return f.publishFunctions(funcs)
 }
 
 // GetFunctionForVMAddr returns the function containing a given virual address
@@ -3545,14 +3617,19 @@ func (f *File) GetDyldExport(symbol string) (*trie.TrieExport, error) {
 	} else {
 		var err error
 		var r *bytes.Reader
-		if f.exptrieData != nil {
-			r = bytes.NewReader(f.exptrieData)
+		f.expMu.Lock()
+		data := f.exptrieData
+		f.expMu.Unlock()
+		if data != nil {
+			r = bytes.NewReader(data)
 		} else {
 			data, err := saferio.ReadDataAt(f.cr, uint64(dxt.Size), int64(dxt.Offset))
 			if err != nil {
 				return nil, fmt.Errorf("failed to read %s data at offset=%#x; %v", types.LC_DYLD_EXPORTS_TRIE, int64(dxt.Offset), err)
 			}
+			f.expMu.Lock()
 			f.exptrieData = data
+			f.expMu.Unlock()
 			r = bytes.NewReader(data)
 		}
 		if _, err = trie.WalkTrie(r, symbol); err != nil {
@@ -3562,10 +3639,18 @@ func (f *File) GetDyldExport(symbol string) (*trie.TrieExport, error) {
 	}
 }
 
+// parsedDyldExports returns the LC_DYLD_EXPORTS_TRIE parse DyldExports has
+// published, if any.
+func (f *File) parsedDyldExports() []trie.TrieExport {
+	f.expMu.Lock()
+	defer f.expMu.Unlock()
+	return f.exp
+}
+
 // DyldExports returns the dyld export trie symbols
 func (f *File) DyldExports() ([]trie.TrieExport, error) {
-	if f.exp != nil {
-		return f.exp, nil
+	if exp := f.parsedDyldExports(); exp != nil {
+		return exp, nil
 	}
 	if dxt := f.DyldExportsTrie(); dxt != nil {
 		if dxt.Size == 0 {
@@ -3575,11 +3660,20 @@ func (f *File) DyldExports() ([]trie.TrieExport, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read %s data at offset=%#x; %v", types.LC_DYLD_EXPORTS_TRIE, int64(dxt.Offset), err)
 		}
-		f.exp, err = trie.ParseTrieExports(bytes.NewReader(data), f.GetBaseAddress())
+		exp, err := trie.ParseTrieExports(bytes.NewReader(data), f.GetBaseAddress())
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse %s: %v", types.LC_DYLD_EXPORTS_TRIE, err)
 		}
-		return f.exp, nil
+		// Two concurrent first calls parse the same bytes; keep the first
+		// published slice so that everybody (and the export lookup indexes,
+		// which are keyed by slice identity) sees one value.
+		f.expMu.Lock()
+		if f.exp == nil {
+			f.exp = exp
+		}
+		exp = f.exp
+		f.expMu.Unlock()
+		return exp, nil
 	}
 
 	return nil, fmt.Errorf("macho does not contain LC_DYLD_EXPORTS_TRIE")

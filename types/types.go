@@ -423,12 +423,31 @@ func (v *VMAddrConverter) GetVMAddress(offset uint64) (uint64, error) {
 	return v.Offet2VMAddr(offset)
 }
 
-// MachoReader is a custom io.SectionReader interface with virtual address support
+// MachoReader is a custom io.SectionReader interface with virtual address support.
+//
+// Only Read, Seek and SeekToAddr use (and move) the reader's position. ReadAt
+// and ReadAtAddr must not depend on or change it, and - like io.ReaderAt -
+// must be safe to call concurrently; the Mach-O parsers rely on that. Readers
+// that also implement ReaderCloner let one *File be used from several
+// goroutines at once.
 type MachoReader interface {
 	io.ReadSeeker
 	io.ReaderAt
 	SeekToAddr(addr uint64) error
 	ReadAtAddr(buf []byte, addr uint64) (int, error)
+}
+
+// ReaderCloner is implemented by MachoReaders that can hand out independent
+// cursors over the same data. Clone returns a reader that shares the
+// underlying data (and address conversion) with the receiver but has its own
+// position, so that the two can be read and seeked concurrently. The clone's
+// initial position is unspecified; callers seek before they read.
+//
+// The Mach-O parsers create one clone per public call. A reader that does
+// not implement ReaderCloner is used as it is, and the File built on it is
+// then not safe for concurrent use.
+type ReaderCloner interface {
+	Clone() MachoReader
 }
 
 // NewCustomSectionReader returns a CustomSectionReader that reads from r
@@ -439,7 +458,11 @@ func NewCustomSectionReader(r io.ReaderAt, vma *VMAddrConverter, off int64, n in
 
 // CustomSectionReader implements Read, Seek, and ReadAt on a section
 // of an underlying ReaderAt.
-// It also stubs out the MachoReader required SeekToAddr and ReadAtAddr
+// It also stubs out the MachoReader required SeekToAddr and ReadAtAddr.
+//
+// ReadAt and ReadAtAddr are safe for concurrent use; Read, Seek and
+// SeekToAddr share one position and are not. Clone gives out a second
+// position over the same section.
 type CustomSectionReader struct {
 	r     io.ReaderAt
 	vma   *VMAddrConverter
@@ -496,6 +519,15 @@ func (s *CustomSectionReader) ReadAt(p []byte, off int64) (n int, err error) {
 
 // Size returns the size of the section in bytes.
 func (s *CustomSectionReader) Size() int64 { return s.limit - s.base }
+
+// Clone implements ReaderCloner: the result reads the same section of the
+// same ReaderAt through the same VMAddrConverter, with its own position
+// (starting at the beginning of the section).
+func (s *CustomSectionReader) Clone() MachoReader {
+	c := *s
+	c.off = c.base
+	return &c
+}
 
 func (s *CustomSectionReader) SeekToAddr(addr uint64) error {
 	off, err := s.vma.VMAddr2Offet(addr)

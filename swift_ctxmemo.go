@@ -15,21 +15,24 @@ import (
 // getContextDescUncached stays the definition of the result. The memo only
 // replays it, under conditions in which a replay is indistinguishable:
 //
-//   - It lives for the duration of the outermost parsing call only (see
-//     swiftContextScope). Everything the result depends on besides the file
-//     bytes - Symtab, load commands, fixup caches, shared-cache bases - can be
-//     changed by the caller between calls, never during one.
+//   - It lives only while a parsing call is open (see swiftContextScope);
+//     with concurrent callers, until the last of them closes its scope.
+//     Everything the result depends on besides the file bytes - Symtab, load
+//     commands, fixup caches, shared-cache bases - can be changed by the
+//     caller between calls, never during one (File's documented contract).
 //   - Only top-level requests are remembered and answered, never the parents
 //     looked up along the way: the cycle and depth errors depend on the chain
 //     of children a lookup came through.
 //   - Only successes are remembered. A failing lookup runs again in full, so
 //     every entry point into a parent cycle still reports its own error.
-//   - getContextDesc leaves the shared reader f.cr wherever its last descriptor
+//   - getContextDesc leaves the caller's cursor wherever its last descriptor
 //     read ended, and callers that ignore a failed SeekToAddr go on reading
 //     from there. A replay therefore restores that position too. That is only
 //     possible for the library's own reader, and only meaningful when the
 //     lookup moved the reader to a position of its own choosing (pos != the
-//     position it started from); other lookups are not remembered.
+//     position it started from); other lookups are not remembered. The
+//     position a lookup ends at does not depend on where it started, so an
+//     entry recorded through one cursor replays correctly on any other.
 //   - No caller-supplied code may run inside the lookup: no PointerResolver and
 //     no custom VMAddrConverter.
 //   - A fresh copy is returned every time, as before.
@@ -40,7 +43,7 @@ type swiftContextMemo struct {
 
 type swiftContextMemoEntry struct {
 	ctx swift.TargetModuleContext
-	pos int64 // f.cr position after the lookup
+	pos int64 // cursor position after the lookup
 }
 
 // swiftContextScope opens a parsing call that may share context descriptor
@@ -59,38 +62,43 @@ func (f *File) swiftContextScope() (end func()) {
 	}
 }
 
-// swiftContextMemoReader returns the reader whose position a replay has to
-// restore, or false when lookups must not be remembered.
-func (f *File) swiftContextMemoReader() (*types.CustomSectionReader, bool) {
+// swiftContextMemoUsable reports whether lookups through cr may be
+// remembered: cr must be the library's own reader, whose Seek positions a
+// replay can restore, and no caller code may run inside the lookup.
+func (f *File) swiftContextMemoUsable(cr types.MachoReader) bool {
 	if f.pointerResolver != nil || f.customVMAddrConverter {
-		return nil, false
+		return false
 	}
-	cr, ok := f.cr.(*types.CustomSectionReader)
-	return cr, ok
+	_, ok := cr.(*types.CustomSectionReader)
+	return ok
 }
 
-func (f *File) getContextDesc(addr uint64) (*swift.TargetModuleContext, error) {
-	cr, ok := f.swiftContextMemoReader()
-	if !ok {
-		return f.getContextDescUncached(addr)
+// getContextDesc resolves the context descriptor at addr through cr, the
+// calling public method's cursor (see File.newReader). The memo is shared by
+// every scope open on the File, including scopes of concurrent calls: an
+// entry only depends on the file bytes and the position it leaves cr at, and
+// both are the same for every cursor.
+func (f *File) getContextDesc(cr types.MachoReader, addr uint64) (*swift.TargetModuleContext, error) {
+	if !f.swiftContextMemoUsable(cr) {
+		return f.getContextDescUncached(cr, addr)
 	}
 	f.swiftCtxMu.Lock()
 	active := f.swiftCtx.depth > 0
 	entry, hit := f.swiftCtx.entries[addr]
 	f.swiftCtxMu.Unlock()
 	if !active {
-		return f.getContextDescUncached(addr)
+		return f.getContextDescUncached(cr, addr)
 	}
 	if hit {
 		if _, err := cr.Seek(entry.pos, io.SeekStart); err == nil {
 			ctx := entry.ctx
 			return &ctx, nil
 		}
-		return f.getContextDescUncached(addr)
+		return f.getContextDescUncached(cr, addr)
 	}
 
 	before, errBefore := cr.Seek(0, io.SeekCurrent)
-	ctx, err := f.getContextDescUncached(addr)
+	ctx, err := f.getContextDescUncached(cr, addr)
 	if err != nil || ctx == nil || errBefore != nil {
 		return ctx, err
 	}

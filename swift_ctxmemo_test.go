@@ -87,8 +87,8 @@ func TestGetContextDescMemoIsInvisible(t *testing.T) {
 				if _, ok := got.swiftCtx.entries[addr]; ok {
 					hits++
 				}
-				gotCtx, gotErr := got.getContextDesc(addr)
-				wantCtx, wantErr := want.getContextDescUncached(addr)
+				gotCtx, gotErr := got.getContextDesc(got.cr, addr)
+				wantCtx, wantErr := want.getContextDescUncached(want.cr, addr)
 				if !reflect.DeepEqual(gotCtx, wantCtx) || errString(gotErr) != errString(wantErr) {
 					t.Fatalf("iter %d: getContextDesc(%#x) = %+v, %s; uncached = %+v, %s",
 						iter, addr, gotCtx, errString(gotErr), wantCtx, errString(wantErr))
@@ -114,7 +114,7 @@ func TestGetContextDescMemoIsInvisible(t *testing.T) {
 			}
 		}
 		// outside a scope nothing is remembered
-		if _, err := got.getContextDesc(descs[0]); err == nil && got.swiftCtx.entries != nil {
+		if _, err := got.getContextDesc(got.cr, descs[0]); err == nil && got.swiftCtx.entries != nil {
 			t.Fatal("memo used outside a scope")
 		}
 	}
@@ -141,8 +141,8 @@ func TestGetContextDescMemoCycleErrors(t *testing.T) {
 	defer got.swiftContextScope()()
 	for round := 0; round < 3; round++ {
 		for _, off := range []uint64{0, 12, 24, 36, 36, 24, 12, 0} {
-			_, gotErr := got.getContextDesc(base + off)
-			_, wantErr := want.getContextDescUncached(base + off)
+			_, gotErr := got.getContextDesc(got.cr, base+off)
+			_, wantErr := want.getContextDescUncached(want.cr, base+off)
 			if gotErr == nil || errString(gotErr) != errString(wantErr) {
 				t.Fatalf("entry %#x: got %v, want %v", off, gotErr, wantErr)
 			}
@@ -164,7 +164,7 @@ func TestGetContextDescMemoDisabledWithCallerCode(t *testing.T) {
 		configure(f)
 		end := f.swiftContextScope()
 		for i := 0; i < 3; i++ {
-			if _, err := f.getContextDesc(base + 12); err != nil {
+			if _, err := f.getContextDesc(f.cr, base+12); err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
 		}
@@ -195,14 +195,14 @@ func BenchmarkGetContextDesc(b *testing.B) {
 	b.Run("uncached", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			file.cr.SeekToAddr(base + 48) // as the parsers do
-			file.getContextDescUncached(base + 48)
+			file.getContextDescUncached(file.cr, base+48)
 		}
 	})
 	b.Run("memo", func(b *testing.B) {
 		defer file.swiftContextScope()()
 		for i := 0; i < b.N; i++ {
 			file.cr.SeekToAddr(base + 48)
-			file.getContextDesc(base + 48)
+			file.getContextDesc(file.cr, base+48)
 		}
 	})
 }
