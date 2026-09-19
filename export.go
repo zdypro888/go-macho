@@ -183,7 +183,19 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 
 	// create segment offset map
 	var newSegOffset uint64
-	for _, seg := range f.Segments() {
+	segments := f.Segments()
+	for i, seg := range segments {
+		newFilesz := pageAlign(seg.Filesz, pgSz)
+		// 行为变更说明: 以前每个段的文件大小都补到页对齐，包括独立（非 cache）文件里
+		// 排在最后的 __LINKEDIT。代码签名必须是 __LINKEDIT 乃至整个文件的最后一段数据，
+		// 补出来的 0 跟在签名后面，导出的文件因此无法再被 codesign 重新签名
+		// ("internal error in Code Signing subsystem")：/bin/ls 导出后比原文件多 9632
+		// 字节，去掉这段填充后与原文件逐字节相同、可以重新签名。链接器本身也不对齐
+		// __LINKEDIT 的 filesize。in-cache 的 __LINKEDIT 会在下面按重建后的实际大小
+		// 覆盖这里的值，不受影响；其它段的布局不变。
+		if !inCache && i == len(segments)-1 && seg.Name == "__LINKEDIT" {
+			newFilesz = seg.Filesz
+		}
 		segMap = append(segMap, segMapInfo{
 			Name: seg.Name,
 			Old: segInfo{
@@ -192,12 +204,12 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 			},
 			New: segInfo{
 				Start: newSegOffset,
-				End:   newSegOffset + pageAlign(seg.Filesz, pgSz),
+				End:   newSegOffset + newFilesz,
 			},
 			OrigMemsz:  seg.Memsz,
 			OrigFilesz: seg.Filesz,
 		})
-		newSegOffset += pageAlign(seg.Filesz, pgSz)
+		newSegOffset += newFilesz
 	}
 
 	sort.Sort(segMap)
