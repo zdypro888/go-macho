@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"os"
@@ -26,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zdypro888/go-macho/internal/saferio"
 )
 
 var (
@@ -203,8 +206,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 		return nil, ErrBadHeaderSize
 	}
 
-	ztoc := make([]byte, xh.toc_len_zlib)
-	_, err = xr.xar.ReadAt(ztoc, xarHeaderSize)
+	ztoc, err := readDataAt(xr.xar, xh.toc_len_zlib, xarHeaderSize)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +223,11 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	// os.WriteFile("toc.xml", dat, 0644)
 
 	xr.root = &xmlXar{}
-	decoder := xml.NewDecoder(zr)
+	// A few kilobytes of zlib data can inflate to gigabytes of XML. The header
+	// states the inflated size; honour it, but never go below maxUncheckedTOC
+	// so archives with a wrong toc_len_plain keep decoding as before.
+	tocLimit := max(xh.toc_len_plain, maxUncheckedTOC)
+	decoder := xml.NewDecoder(io.LimitReader(zr, int64(min(tocLimit, 1<<62))))
 	decoder.Strict = false
 	err = decoder.Decode(xr.root)
 	if err != nil {
@@ -235,8 +241,10 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	}
 
 	// Check whether the XAR checksum matches
-	storedsum := make([]byte, xr.root.Toc.Checksum.Size)
-	_, err = io.ReadFull(io.NewSectionReader(xr.xar, xr.heapOffset+xr.root.Toc.Checksum.Offset, xr.root.Toc.Checksum.Size), storedsum)
+	if xr.root.Toc.Checksum.Size < 0 {
+		return nil, fmt.Errorf("xar: invalid TOC checksum size %d", xr.root.Toc.Checksum.Size)
+	}
+	storedsum, err := readData(io.NewSectionReader(xr.xar, xr.heapOffset+xr.root.Toc.Checksum.Offset, xr.root.Toc.Checksum.Size), uint64(xr.root.Toc.Checksum.Size))
 	if err != nil {
 		return nil, err
 	}
@@ -303,8 +311,11 @@ func (r *Reader) readAndVerifySignature(root *xmlXar, checksumKind uint32, check
 			return ErrNoCertificates
 		}
 
-		signature := make([]byte, root.Toc.Signature.Size)
-		_, err = r.xar.ReadAt(signature, r.heapOffset+root.Toc.Signature.Offset)
+		if root.Toc.Signature.Size < 0 {
+			return fmt.Errorf("xar: invalid signature size %d", root.Toc.Signature.Size)
+		}
+		var signature []byte
+		signature, err = readDataAt(r.xar, uint64(root.Toc.Signature.Size), r.heapOffset+root.Toc.Signature.Offset)
 		if err != nil {
 			return err
 		}
@@ -564,4 +575,34 @@ func (f *File) VerifyChecksum() bool {
 	io.Copy(hasher, io.NewSectionReader(f.heap, f.offset, f.length))
 	sum := hasher.Sum(nil)
 	return bytes.Equal(sum, f.CompressedChecksum.Sum)
+}
+
+// maxUncheckedTOC is how much inflated TOC is decoded regardless of what the
+// header's toc_len_plain says. It is a variable only so tests can lower it.
+var maxUncheckedTOC uint64 = 256 << 20
+
+// safeAllocChunk is the amount of memory we are willing to allocate on the word
+// of a size field alone. Below it the historical make+read path is used
+// verbatim; above it data is read in chunks, so a size that is not backed by
+// the archive fails at the first missing chunk.
+const safeAllocChunk = 10 << 20
+
+// readDataAt replaces make([]byte, n) + r.ReadAt(buf, off).
+func readDataAt(r io.ReaderAt, n uint64, off int64) ([]byte, error) {
+	if n < safeAllocChunk {
+		buf := make([]byte, n)
+		_, err := r.ReadAt(buf, off)
+		return buf, err
+	}
+	return saferio.ReadDataAt(r, n, off)
+}
+
+// readData replaces make([]byte, n) + io.ReadFull(r, buf).
+func readData(r io.Reader, n uint64) ([]byte, error) {
+	if n < safeAllocChunk {
+		buf := make([]byte, n)
+		_, err := io.ReadFull(r, buf)
+		return buf, err
+	}
+	return saferio.ReadData(r, n)
 }

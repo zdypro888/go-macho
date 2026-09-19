@@ -121,6 +121,46 @@ func (f *File) textSegmentFirstSectionRelOff(inCache bool) (uint64, error) {
 	return 0, nil
 }
 
+// exportSegmentsReadable reports whether it is safe to pre-allocate total bytes
+// for the export buffer: the last byte of every segment's file data has to be
+// readable and the segment sizes have to add up to at least total. Growing the
+// buffer is only an optimization, so a false result never fails the export; it
+// just keeps a bogus filesize from being allocated on its word alone.
+func (f *File) exportSegmentsReadable(inCache bool, total uint64) bool {
+	if total > uint64(^uint(0)>>1) {
+		return false
+	}
+	var sum uint64
+	var b [1]byte
+	for _, seg := range f.Segments() {
+		if seg.Filesz == 0 {
+			continue
+		}
+		aligned := pageAlign(seg.Filesz, f.pageSize())
+		if aligned < seg.Filesz || sum+aligned < sum {
+			return false
+		}
+		sum += aligned
+		last := seg.Filesz - 1
+		if inCache {
+			if seg.Addr > math.MaxUint64-last {
+				return false
+			}
+			if n, _ := f.cr.ReadAtAddr(b[:], seg.Addr+last); n != 1 {
+				return false
+			}
+			continue
+		}
+		if f.sr == nil || seg.Offset > math.MaxInt64 || last > math.MaxInt64-seg.Offset {
+			return false
+		}
+		if n, _ := f.sr.ReadAt(b[:], int64(seg.Offset+last)); n != 1 {
+			return false
+		}
+	}
+	return total <= sum
+}
+
 func textSegmentWriteStart(firstSectionRelOff, endOfLoadsOffset, dataLen uint64) (uint64, error) {
 	dataStart := firstSectionRelOff
 	if endOfLoadsOffset > dataStart {
@@ -164,7 +204,9 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 
 	// pre-allocate output buffer to avoid repeated doubling during writes
 	if len(segMap) > 0 {
-		buf.Grow(int(segMap[len(segMap)-1].New.End))
+		if total := segMap[len(segMap)-1].New.End; total < safeAllocChunk || f.exportSegmentsReadable(inCache, total) {
+			buf.Grow(int(total))
+		}
 	}
 
 	// save original __TEXT layout before load commands rewrite changes offsets
@@ -228,7 +270,24 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 	}
 
 	endOfLoadsOffset := uint64(buf.Len())
-	readOriginalSegment := func(dat []byte, seg *Segment, smi segMapInfo) error {
+	// readOriginalSegment returns smi.OrigFilesz bytes of the segment. Sizes
+	// below safeAllocChunk take the historical make+read path verbatim; larger
+	// ones are read in chunks so a bogus filesize fails at the first missing
+	// chunk instead of allocating the declared amount up front.
+	readOriginalSegment := func(seg *Segment, smi segMapInfo) ([]byte, error) {
+		if smi.OrigFilesz >= safeAllocChunk {
+			if inCache {
+				return readDataAtAddr(f.cr, smi.OrigFilesz, seg.Addr)
+			}
+			if f.sr == nil {
+				return nil, fmt.Errorf("source file reader is unavailable")
+			}
+			if smi.Old.Start > math.MaxInt64 {
+				return nil, fmt.Errorf("original segment offset %#x exceeds int64", smi.Old.Start)
+			}
+			return readDataAt(f.sr, smi.OrigFilesz, int64(smi.Old.Start))
+		}
+		dat := make([]byte, smi.OrigFilesz)
 		var (
 			n   int
 			err error
@@ -241,18 +300,38 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 			// source reader at the offset captured in segMap instead of asking
 			// the now-mutated VM address converter for an offset.
 			if f.sr == nil {
-				return fmt.Errorf("source file reader is unavailable")
+				return nil, fmt.Errorf("source file reader is unavailable")
 			}
 			if smi.Old.Start > math.MaxInt64 {
-				return fmt.Errorf("original segment offset %#x exceeds int64", smi.Old.Start)
+				return nil, fmt.Errorf("original segment offset %#x exceeds int64", smi.Old.Start)
 			}
 			n, err = f.sr.ReadAt(dat, int64(smi.Old.Start))
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if n != len(dat) {
-			return io.ErrUnexpectedEOF
+			return nil, io.ErrUnexpectedEOF
+		}
+		return dat, nil
+	}
+	// zeroPad appends n zero bytes. n derives from segment sizes in the file,
+	// so it is written in bounded pieces rather than through one make(n).
+	zeroPad := func(n uint64) error {
+		if n < safeAllocChunk {
+			_, err := buf.Write(make([]byte, n))
+			return err
+		}
+		if n > math.MaxInt64 {
+			return fmt.Errorf("padding size %#x exceeds allocation limit", n)
+		}
+		zeros := make([]byte, safeAllocChunk)
+		for n > 0 {
+			next := min(n, uint64(len(zeros)))
+			if _, err := buf.Write(zeros[:next]); err != nil {
+				return err
+			}
+			n -= next
 		}
 		return nil
 	}
@@ -263,15 +342,15 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 		if seg.Filesz > 0 {
 			// pad buffer to this segment's expected start offset
 			if uint64(buf.Len()) < smi.New.Start {
-				if _, err := buf.Write(make([]byte, smi.New.Start-uint64(buf.Len()))); err != nil {
+				if err := zeroPad(smi.New.Start - uint64(buf.Len())); err != nil {
 					return fmt.Errorf("failed to write pre-segment padding for %s: %v", seg.Name, err)
 				}
 			}
 			switch seg.Name {
 			case "__TEXT":
 				// read original __TEXT data from cache (use original filesz)
-				dat := make([]byte, smi.OrigFilesz)
-				if err := readOriginalSegment(dat, seg, smi); err != nil {
+				dat, err := readOriginalSegment(seg, smi)
+				if err != nil {
 					return fmt.Errorf("failed to read segment %s data: %v", seg.Name, err)
 				}
 				// write __TEXT data after the header+load commands we already wrote
@@ -281,7 +360,7 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 				}
 				if dataStart > endOfLoadsOffset {
 					// pad gap between end of load commands and first section
-					if _, err := buf.Write(make([]byte, dataStart-endOfLoadsOffset)); err != nil {
+					if err := zeroPad(dataStart - endOfLoadsOffset); err != nil {
 						return fmt.Errorf("failed to write __TEXT LC-to-section padding: %v", err)
 					}
 				}
@@ -294,8 +373,8 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 						return fmt.Errorf("failed to write optimized segment %s to export buffer: %v", seg.Name, err)
 					}
 				} else {
-					dat := make([]byte, smi.OrigFilesz)
-					if err := readOriginalSegment(dat, seg, smi); err != nil {
+					dat, err := readOriginalSegment(seg, smi)
+					if err != nil {
 						return fmt.Errorf("failed to read segment %s data: %v", seg.Name, err)
 					}
 					if _, err := buf.Write(dat); err != nil {
@@ -303,8 +382,8 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 					}
 				}
 			default:
-				dat := make([]byte, smi.OrigFilesz)
-				if err := readOriginalSegment(dat, seg, smi); err != nil {
+				dat, err := readOriginalSegment(seg, smi)
+				if err != nil {
 					return fmt.Errorf("failed to read segment %s data: %v", seg.Name, err)
 				}
 				if _, err := buf.Write(dat); err != nil {
@@ -314,7 +393,7 @@ func (f *File) Export(path string, dcf *fixupchains.DyldChainedFixups, baseAddre
 		}
 		// pad to segment's page-aligned end
 		if uint64(buf.Len()) < smi.New.End {
-			if _, err := buf.Write(make([]byte, smi.New.End-uint64(buf.Len()))); err != nil {
+			if err := zeroPad(smi.New.End - uint64(buf.Len())); err != nil {
 				return fmt.Errorf("failed to write post-segment padding for %s: %v", seg.Name, err)
 			}
 		}
@@ -586,13 +665,24 @@ func (f *File) CodeSign(config *codesign.Config) (retErr error) {
 	if ledataLength > maxInt {
 		return fmt.Errorf("__LINKEDIT prefix size %#x exceeds platform allocation limit", ledataLength)
 	}
-	ledata := make([]byte, int(ledataLength))
 	size := ledataLength
 	if size > linkedit.Filesz {
 		size = linkedit.Filesz
 	}
-	if n, err := f.cr.ReadAtAddr(ledata[:size], linkedit.Addr); err != nil {
-		return fmt.Errorf("failed to read __LINKEDIT data: read=%d, %v", n, err)
+	var ledata []byte
+	if ledataLength < safeAllocChunk {
+		ledata = make([]byte, int(ledataLength))
+		if n, err := f.cr.ReadAtAddr(ledata[:size], linkedit.Addr); err != nil {
+			return fmt.Errorf("failed to read __LINKEDIT data: read=%d, %v", n, err)
+		}
+	} else {
+		// Same bytes as above, but the part backed by the file is read in
+		// chunks first so a bogus size fails before it is allocated.
+		prefix, err := readDataAtAddr(f.cr, size, linkedit.Addr)
+		if err != nil {
+			return fmt.Errorf("failed to read __LINKEDIT data: read=%d, %v", len(prefix), err)
+		}
+		ledata = append(prefix, make([]byte, int(ledataLength-size))...)
 	}
 
 	estimatedSignatureSize := codesign.EstimateCodeSignatureSize(cfg)
@@ -645,13 +735,22 @@ func (f *File) CodeSign(config *codesign.Config) (retErr error) {
 	if signatureOffset > maxInt {
 		return fmt.Errorf("code signing range %#x exceeds platform allocation limit", signatureOffset)
 	}
-	data := make([]byte, int(signatureOffset))
 	readLength := linkedit.Offset + size
 	if readLength < linkedit.Offset || readLength > signatureOffset {
 		return fmt.Errorf("code signing read range %#x is outside signature offset %#x", readLength, signatureOffset)
 	}
-	if _, err := f.ReadAt(data[:int(readLength)], 0); err != nil {
-		return fmt.Errorf("failed to read codesign data: %v", err)
+	var data []byte
+	if signatureOffset < safeAllocChunk {
+		data = make([]byte, int(signatureOffset))
+		if _, err := f.ReadAt(data[:int(readLength)], 0); err != nil {
+			return fmt.Errorf("failed to read codesign data: %v", err)
+		}
+	} else {
+		prefix, err := readDataAt(f, readLength, 0)
+		if err != nil {
+			return fmt.Errorf("failed to read codesign data: %v", err)
+		}
+		data = append(prefix, make([]byte, int(signatureOffset-readLength))...)
 	}
 	// write modified file header and load commands (including __LINKEDIT and CodeSignature), since they are covered by hashes
 	var buf bytes.Buffer
@@ -730,9 +829,12 @@ func (f *File) SaveBuffer(buf *bytes.Buffer) error {
 		if seg.Filesz > 0 {
 			switch seg.Name {
 			case "__TEXT":
-				dat := make([]byte, seg.Filesz)
-				if _, err := f.cr.ReadAtAddr(dat, seg.Addr); err != nil {
+				dat, err := readDataAtAddr(f.cr, seg.Filesz, seg.Addr)
+				if err != nil {
 					return fmt.Errorf("failed to read segment %s data: %v", seg.Name, err)
+				}
+				if endOfLoadsOffset > uint64(len(dat)) {
+					return fmt.Errorf("load commands end %#x exceeds segment %s data length %#x", endOfLoadsOffset, seg.Name, len(dat))
 				}
 				if _, err := buf.Write(dat[endOfLoadsOffset:]); err != nil {
 					return fmt.Errorf("failed to write segment %s to export buffer: %v", seg.Name, err)
@@ -743,8 +845,8 @@ func (f *File) SaveBuffer(buf *bytes.Buffer) error {
 						return fmt.Errorf("failed to write segment %s to export buffer: %v", seg.Name, err)
 					}
 				} else {
-					dat := make([]byte, seg.Filesz)
-					if _, err := f.cr.ReadAtAddr(dat, seg.Addr); err != nil {
+					dat, err := readDataAtAddr(f.cr, seg.Filesz, seg.Addr)
+					if err != nil {
 						return fmt.Errorf("failed to read segment %s data: %v", seg.Name, err)
 					}
 					if _, err := buf.Write(dat); err != nil {
@@ -752,8 +854,8 @@ func (f *File) SaveBuffer(buf *bytes.Buffer) error {
 					}
 				}
 			default:
-				dat := make([]byte, seg.Filesz)
-				if _, err := f.cr.ReadAtAddr(dat, seg.Addr); err != nil {
+				dat, err := readDataAtAddr(f.cr, seg.Filesz, seg.Addr)
+				if err != nil {
 					return fmt.Errorf("failed to read segment %s data: %v", seg.Name, err)
 				}
 				if _, err := buf.Write(dat); err != nil {
@@ -1248,8 +1350,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get LC_DYLD_EXPORTS_TRIE exports: %v", err)
 		}
-		dat := make([]byte, dexpTrie.Size)
-		if _, err = f.cr.ReadAt(dat, int64(dexpTrie.Offset)); err != nil {
+		dat, err := readDataAt(f.cr, uint64(dexpTrie.Size), int64(dexpTrie.Offset))
+		if err != nil {
 			return nil, fmt.Errorf("failed to read LC_DYLD_EXPORTS_TRIE data: %v", err)
 		}
 		dexpTrie.Offset = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1264,8 +1366,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 	}
 	// optimize LC_DATA_IN_CODE
 	if dataNCode := f.DataInCode(); dataNCode != nil {
-		dat := make([]byte, dataNCode.Size)
-		if _, err = f.cr.ReadAt(dat, int64(dataNCode.Offset)); err != nil {
+		dat, err := readDataAt(f.cr, uint64(dataNCode.Size), int64(dataNCode.Offset))
+		if err != nil {
 			return nil, fmt.Errorf("failed to read LC_DATA_IN_CODE data: %v", err)
 		}
 		dataNCode.Offset = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1284,8 +1386,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 
 	// optimize LC_FUNCTION_STARTS
 	if fstarts := f.FunctionStarts(); fstarts != nil {
-		dat := make([]byte, fstarts.Size)
-		if _, err := f.cr.ReadAt(dat, int64(fstarts.Offset)); err != nil {
+		dat, err := readDataAt(f.cr, uint64(fstarts.Size), int64(fstarts.Offset))
+		if err != nil {
 			return nil, fmt.Errorf("failed to read LC_FUNCTION_STARTS data: %v", err)
 		}
 		fstarts.Offset = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1365,8 +1467,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 	// optimize LC_DYLD_INFO|LC_DYLD_INFO_ONLY
 	if dinfo := f.DyldInfo(); dinfo != nil {
 		if dinfo.RebaseSize > 0 {
-			dat := make([]byte, dinfo.RebaseSize)
-			if _, err := f.cr.ReadAt(dat, int64(dinfo.RebaseOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dinfo.RebaseSize), int64(dinfo.RebaseOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s rebase data: %v", dinfo.LoadCmd, err)
 			}
 			dinfo.RebaseOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1375,8 +1477,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dinfo.BindSize > 0 {
-			dat := make([]byte, dinfo.BindSize)
-			if _, err := f.cr.ReadAt(dat, int64(dinfo.BindOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dinfo.BindSize), int64(dinfo.BindOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s bind data: %v", dinfo.LoadCmd, err)
 			}
 			dinfo.BindOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1385,8 +1487,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dinfo.WeakBindSize > 0 {
-			dat := make([]byte, dinfo.WeakBindSize)
-			if _, err := f.cr.ReadAt(dat, int64(dinfo.WeakBindOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dinfo.WeakBindSize), int64(dinfo.WeakBindOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s weak bind data: %v", dinfo.LoadCmd, err)
 			}
 			dinfo.WeakBindOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1395,8 +1497,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dinfo.LazyBindSize > 0 {
-			dat := make([]byte, dinfo.LazyBindSize)
-			if _, err := f.cr.ReadAt(dat, int64(dinfo.LazyBindOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dinfo.LazyBindSize), int64(dinfo.LazyBindOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s lazy bind data: %v", dinfo.LoadCmd, err)
 			}
 			dinfo.LazyBindOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1405,8 +1507,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dinfo.ExportSize > 0 {
-			dat := make([]byte, dinfo.ExportSize)
-			if _, err := f.cr.ReadAt(dat, int64(dinfo.ExportOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dinfo.ExportSize), int64(dinfo.ExportOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s export data: %v", dinfo.LoadCmd, err)
 			}
 			dinfo.ExportOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1421,8 +1523,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 		}
 	} else if dionly := f.DyldInfoOnly(); dionly != nil {
 		if dionly.RebaseSize > 0 {
-			dat := make([]byte, dionly.RebaseSize)
-			if _, err := f.cr.ReadAt(dat, int64(dionly.RebaseOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dionly.RebaseSize), int64(dionly.RebaseOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s rebase data: %v", dionly.LoadCmd, err)
 			}
 			dionly.RebaseOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1431,8 +1533,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dionly.BindSize > 0 {
-			dat := make([]byte, dionly.BindSize)
-			if _, err := f.cr.ReadAt(dat, int64(dionly.BindOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dionly.BindSize), int64(dionly.BindOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s bind data: %v", dionly.LoadCmd, err)
 			}
 			dionly.BindOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1441,8 +1543,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dionly.WeakBindSize > 0 {
-			dat := make([]byte, dionly.WeakBindSize)
-			if _, err := f.cr.ReadAt(dat, int64(dionly.WeakBindOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dionly.WeakBindSize), int64(dionly.WeakBindOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s weak bind data: %v", dionly.LoadCmd, err)
 			}
 			dionly.WeakBindOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1451,8 +1553,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dionly.LazyBindSize > 0 {
-			dat := make([]byte, dionly.LazyBindSize)
-			if _, err := f.cr.ReadAt(dat, int64(dionly.LazyBindOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dionly.LazyBindSize), int64(dionly.LazyBindOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s lazy bind data: %v", dionly.LoadCmd, err)
 			}
 			dionly.LazyBindOff = uint32(linkedit.Offset) + uint32(lebuf.Len())
@@ -1461,8 +1563,8 @@ func (f *File) optimizeLinkedit(locals []Symbol) (*bytes.Buffer, error) {
 			}
 		}
 		if dionly.ExportSize > 0 {
-			dat := make([]byte, dionly.ExportSize)
-			if _, err := f.cr.ReadAt(dat, int64(dionly.ExportOff)); err != nil {
+			dat, err := readDataAt(f.cr, uint64(dionly.ExportSize), int64(dionly.ExportOff))
+			if err != nil {
 				return nil, fmt.Errorf("failed to read %s export data: %v", dionly.LoadCmd, err)
 			}
 			dionly.ExportOff = uint32(linkedit.Offset) + uint32(lebuf.Len())

@@ -102,8 +102,21 @@ func getValue(val asn1.RawValue) (any, error) {
 	}
 }
 
-func parseReqs(data []byte) (req map[string]any, err error) {
+// maxLaunchConstraintDepth bounds the nesting of constraint dictionaries.
+// Every level costs only a few DER bytes, so without a limit a hostile blob
+// can drive the recursion until the goroutine stack limit aborts the process.
+const maxLaunchConstraintDepth = 1000
+
+func parseReqs(data []byte) (map[string]any, error) {
+	return parseReqsDepth(data, 0)
+}
+
+func parseReqsDepth(data []byte, depth int) (req map[string]any, err error) {
 	var prop contraint
+
+	if depth > maxLaunchConstraintDepth {
+		return nil, fmt.Errorf("launch contraint nesting exceeds %d levels", maxLaunchConstraintDepth)
+	}
 
 	req = make(map[string]any)
 
@@ -120,7 +133,7 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 
 		if prop.Val.IsCompound {
 			if prop.Val.Class == asn1.ClassContextSpecific {
-				req[prop.Key], err = parseReqs(prop.Val.Bytes)
+				req[prop.Key], err = parseReqsDepth(prop.Val.Bytes, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -136,7 +149,7 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 					}
 					req[prop.Key] = make([]any, 0, len(andArray))
 					for _, and := range andArray {
-						r, err := parseReqs(and.FullBytes)
+						r, err := parseReqsDepth(and.FullBytes, depth+1)
 						if err != nil {
 							return nil, err
 						}
@@ -150,7 +163,7 @@ func parseReqs(data []byte) (req map[string]any, err error) {
 					}
 					req[prop.Key] = make([]any, 0, len(orArray))
 					for _, or := range orArray {
-						r, err := parseReqs(or.FullBytes)
+						r, err := parseReqsDepth(or.FullBytes, depth+1)
 						if err != nil {
 							return nil, err
 						}

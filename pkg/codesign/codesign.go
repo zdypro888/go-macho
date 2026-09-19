@@ -321,6 +321,11 @@ func ParseCodeSignature(cmddat []byte) (*CodeSignature, error) {
 	return cs, nil
 }
 
+// requirementParseBudget is the number of requirement blob bytes a single
+// requirements slot may make us parse when its index entries overlap. Slots
+// larger than this get a budget equal to their own size.
+const requirementParseBudget = 16 << 20
+
 func parseRequirementsSlot(data []byte, slotOffset, superBlobLength uint32) ([]types.Requirement, error) {
 	const (
 		requirementsHeaderSize = uint64(12) // magic, length, count/kind
@@ -345,6 +350,13 @@ func parseRequirementsSlot(data []byte, slotOffset, superBlobLength uint32) ([]t
 	}
 	slot := data[slotOffset : uint64(slotOffset)+uint64(outer.Length)]
 
+	// Index entries may legally share or overlap inner blobs, so a small
+	// hostile vector could make us re-parse (and retain the text of) the same
+	// large blob once per entry. Entries of a well-formed vector are disjoint
+	// and therefore never add up to more than the slot itself.
+	parseBudget := max(uint64(len(slot)), requirementParseBudget)
+	var parsedBytes uint64
+
 	parseInner := func(index types.Requirements, innerOffset uint64) (types.Requirement, error) {
 		if innerOffset+requirementsHeaderSize > uint64(len(slot)) {
 			return types.Requirement{}, fmt.Errorf("%s blob offset %#x has no complete requirement header", index.Type, innerOffset)
@@ -358,6 +370,11 @@ func parseRequirementsSlot(data []byte, slotOffset, superBlobLength uint32) ([]t
 		}
 		if uint64(inner.Length) < requirementsHeaderSize || innerOffset+uint64(inner.Length) > uint64(len(slot)) {
 			return types.Requirement{}, fmt.Errorf("%s blob [%#x,%#x) exceeds requirements vector length %#x", index.Type, innerOffset, innerOffset+uint64(inner.Length), len(slot))
+		}
+
+		parsedBytes += uint64(inner.Length)
+		if parsedBytes > parseBudget {
+			return types.Requirement{}, fmt.Errorf("%s blob at %#x: overlapping requirement blobs exceed parse budget of %d bytes", index.Type, innerOffset, parseBudget)
 		}
 
 		innerData := slot[innerOffset : innerOffset+uint64(inner.Length)]
