@@ -47,6 +47,13 @@ import (
 // elements of Symtab.Syms in place after the first symbol lookup: the lookup
 // indexes behind FindSymbolAddress and FindAddressSymbols are tied to the
 // slice, not to its contents. ResetFixupsCache drops those indexes too.
+//
+// A File is not safe for concurrent use. The ObjC and Swift parsers, the
+// export/bind walkers and the section readers all share one seeking reader
+// (a Seek followed by sequential Reads), so two goroutines calling methods
+// such as GetObjCClasses and GetSwiftTypes at the same time race on its
+// position and can return wrong results. Serialise calls on one File, or
+// open the file once per goroutine.
 type File struct {
 	FileTOC
 
