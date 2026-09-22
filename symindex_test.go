@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -85,29 +84,6 @@ func TestFoldKeyMatchesEqualFoldOnStrings(t *testing.T) {
 	}
 	if equal == 0 {
 		t.Fatal("test data contains no case-colliding pairs")
-	}
-}
-
-func TestBuildAddrOrder(t *testing.T) {
-	rng := rand.New(rand.NewSource(5))
-	for iter := 0; iter < 200; iter++ {
-		values := make([]uint64, rng.Intn(3000))
-		mask := ^uint64(0) >> uint(rng.Intn(64))
-		for i := range values {
-			values[i] = rng.Uint64() & mask
-			if rng.Intn(3) == 0 && i > 0 {
-				values[i] = values[rng.Intn(i)]
-			}
-		}
-		want := make([]int32, len(values))
-		for i := range want {
-			want[i] = int32(i)
-		}
-		sort.SliceStable(want, func(a, b int) bool { return values[want[a]] < values[want[b]] })
-		got := buildAddrOrder(len(values), func(i int) uint64 { return values[i] })
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("iter %d: radix order differs from a stable sort", iter)
-		}
 	}
 }
 
@@ -362,7 +338,7 @@ func TestSymbolIndexesMatchLinearScans(t *testing.T) {
 		label := fmt.Sprintf("iter %d layout %d", iter, layout)
 		// well past lookupIndexThreshold: the first lookups are scans, the rest indexed
 		checkSymbolLookups(t, rng, label, got, want, 2*lookupIndexThreshold+100)
-		if len(fx.syms) > 0 && !(got.symIdx.symNames.built && got.symIdx.symAddrs.built) {
+		if len(fx.syms) > 0 && !got.symIdx.symNames.built {
 			t.Fatalf("%s: symbol indexes were never built", label)
 		}
 
@@ -464,11 +440,8 @@ func TestGetBindNameMatchesLinearScan(t *testing.T) {
 			}
 		}
 		check("initial")
-		if !f.bindNameIdx.built {
-			t.Fatalf("iter %d: bind index was never built", iter)
-		}
 		f.ResetFixupsCache()
-		if f.bindNameIdx.built || f.symIdx.symNames.built {
+		if f.symIdx.symNames.built {
 			t.Fatalf("iter %d: ResetFixupsCache kept a lookup index", iter)
 		}
 		f.binds, f.bindsDone = bindFixture(rng, 1+rng.Intn(100)).binds, true
@@ -600,11 +573,6 @@ func BenchmarkSymbolIndexBuild(b *testing.B) {
 	b.Run("names", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			buildNameIndex(len(fx.syms), func(i int) string { return fx.syms[i].Name })
-		}
-	})
-	b.Run("addrs", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			buildAddrOrder(len(fx.syms), func(i int) uint64 { return fx.syms[i].Value })
 		}
 	})
 }

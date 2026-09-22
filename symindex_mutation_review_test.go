@@ -12,7 +12,7 @@ func TestReviewBindIndexAfterPublicSliceEdit(t *testing.T) {
 		f := &File{Loads: []Load{&DyldInfoOnly{}}, binds: types.Binds{
 			{Name: "_first", Start: 1}, {Name: "_second", Start: 2},
 		}, bindsDone: true}
-		for i := 0; i <= bindIndexAfterLookups; i++ {
+		for i := 0; i <= 64; i++ { // formerly enough lookups to build a bind index
 			_, _ = f.GetBindName(2)
 		}
 		binds, err := f.GetBindInfo()

@@ -88,7 +88,6 @@ type File struct {
 	dyldInfoRebaseTargets map[uint64]uint64
 	dyldInfoRebaseValues  map[uint64]struct{}
 	dyldInfoBindsByAddr   map[uint64]types.Bind
-	bindNameIdx           bindNameIndex // GetBindName's index over binds; guarded by fixupsMu
 	lazyLoadMu            sync.Mutex
 
 	// symIndexMu guards symIdx, the lookup indexes of FindSymbolAddress and
@@ -2162,7 +2161,6 @@ func (f *File) ResetFixupsCache() {
 	f.dyldInfoRebaseTargets = nil
 	f.dyldInfoRebaseValues = nil
 	f.dyldInfoBindsByAddr = nil
-	f.bindNameIdx = bindNameIndex{}
 	f.resetSymbolIndexes()
 	if f.vma != nil {
 		f.vma.ChainedPointerFormat = 0
@@ -5256,17 +5254,14 @@ func (f *File) FindAddressSymbols(addr uint64) ([]Symbol, error) {
 	if f.Symtab == nil {
 		return nil, &FormatError{0, "missing symbol table", nil}
 	}
+	// Linear scans on purpose. Symtab.Syms and the exports slice are public and
+	// may be edited in place between calls, so any index has to be validated
+	// against every element first, which costs more than the scan itself
+	// (measured: an address index validated per call was 13x slower).
 	var syms []Symbol
-	all := f.Symtab.Syms
-	if order, ok := f.symtabAddrIndex(all); ok {
-		for _, i := range valueRange(order, func(i int) uint64 { return all[i].Value }, addr) {
-			syms = append(syms, all[i])
-		}
-	} else {
-		for _, sym := range all {
-			if sym.Value == addr {
-				syms = append(syms, sym)
-			}
+	for _, sym := range f.Symtab.Syms {
+		if sym.Value == addr {
+			syms = append(syms, sym)
 		}
 	}
 	if f.DyldExportsTrie() != nil && f.DyldExportsTrie().Size > 0 {
@@ -5274,15 +5269,9 @@ func (f *File) FindAddressSymbols(addr uint64) ([]Symbol, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to get exports: %v", err)
 		}
-		if order, ok := f.dyldExportsAddrIndex(exports); ok {
-			for _, i := range valueRange(order, func(i int) uint64 { return exports[i].Address }, addr) {
-				syms = append(syms, Symbol{Name: exports[i].Name, Value: exports[i].Address})
-			}
-		} else {
-			for _, sym := range exports {
-				if sym.Address == addr {
-					syms = append(syms, Symbol{Name: sym.Name, Value: sym.Address})
-				}
+		for _, sym := range exports {
+			if sym.Address == addr {
+				syms = append(syms, Symbol{Name: sym.Name, Value: sym.Address})
 			}
 		}
 	}

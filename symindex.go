@@ -2,7 +2,6 @@ package macho
 
 import (
 	"math"
-	"sort"
 	"strings"
 	"sync"
 	"unicode"
@@ -28,9 +27,11 @@ import (
 //     orders are checked before binary search. Hit-only checks cannot detect an
 //     earlier duplicate or a new match. Public in-place edits require O(n)
 //     validation; there is no writer-controlled generation counter here.
-//   - Building an index costs as much as a number of linear scans of the same
-//     table (roughly 8 for names, 25 for addresses, 60 for binds; see
-//     BenchmarkSymbolIndexBuild), so that many lookups against a table are
+//   - Only names are indexed. Address and bind lookups are plain scans: with
+//     tables that callers may edit in place, validating an index costs more
+//     than scanning.
+//   - Building an index costs as much as about 8 linear scans of the same
+//     table (see BenchmarkSymbolIndexBuild), so that many lookups against a table are
 //     plain scans first: one-off callers never pay for an index, and nobody
 //     pays more than about twice the scans they replaced.
 //   - Index state is guarded by symIndexMu (a leaf lock: nothing is called while
@@ -38,12 +39,10 @@ import (
 //     Published indexes are immutable.
 const (
 	nameIndexAfterLookups = 8
-	addrIndexAfterLookups = 32
-	bindIndexAfterLookups = 64
 
-	// lookupIndexThreshold is the largest of the above: after that many
-	// lookups against one table every index is in use.
-	lookupIndexThreshold = bindIndexAfterLookups
+	// lookupIndexThreshold: after that many lookups against one table every
+	// index is in use.
+	lookupIndexThreshold = nameIndexAfterLookups
 )
 
 // sliceID identifies a slice by backing array position and length.
@@ -163,38 +162,6 @@ func minFoldRune(r rune) rune {
 	return m
 }
 
-// buildAddrOrder returns the positions 0..n-1 ordered by (value, position), so
-// the positions sharing one value are contiguous and in their original order.
-// It is a byte-wise LSD radix sort: stable, so ties keep their position order,
-// and several times cheaper than a comparison sort on a large symbol table.
-func buildAddrOrder(n int, value func(i int) uint64) []int32 {
-	keys, keysTmp := make([]uint64, n), make([]uint64, n)
-	order, orderTmp := make([]int32, n), make([]int32, n)
-	for i := range order {
-		keys[i], order[i] = value(i), int32(i)
-	}
-	for shift := uint(0); n > 1 && shift < 64; shift += 8 {
-		var count [256]int
-		for _, k := range keys {
-			count[byte(k>>shift)]++
-		}
-		if count[byte(keys[0]>>shift)] == n {
-			continue // every key has the same byte here
-		}
-		sum := 0
-		for b, c := range count {
-			count[b], sum = sum, sum+c
-		}
-		for i, k := range keys {
-			b := byte(k >> shift)
-			keysTmp[count[b]], orderTmp[count[b]] = k, order[i]
-			count[b]++
-		}
-		keys, keysTmp, order, orderTmp = keysTmp, keys, orderTmp, order
-	}
-	return order
-}
-
 // lazyIndex counts lookups against one slice identity and builds the index
 // after the given number of them.
 type lazyIndex[T any, I any] struct {
@@ -261,14 +228,12 @@ func (f *File) exportsSource() exportsSource {
 // symbolIndexes is the File's lookup-index state.
 type symbolIndexes struct {
 	symNames lazyIndex[Symbol, *nameIndex]
-	symAddrs lazyIndex[Symbol, []int32]
 
 	// exports is a private copy of a successful GetExports result; it is never
 	// handed out, so it cannot be modified behind the index's back.
-	exportsSrc   exportsSource
-	exports      []trie.TrieExport
-	exportNames  lazyIndex[trie.TrieExport, *nameIndex]
-	dyldExpAddrs lazyIndex[trie.TrieExport, []int32]
+	exportsSrc  exportsSource
+	exports     []trie.TrieExport
+	exportNames lazyIndex[trie.TrieExport, *nameIndex]
 }
 
 // resetSymbolIndexes drops every symbol lookup index.
@@ -289,22 +254,6 @@ func (f *File) symtabNameIndex(syms []Symbol) (*nameIndex, bool) {
 		return nil, false
 	}
 	return ix, ok
-}
-
-func (f *File) symtabAddrIndex(syms []Symbol) ([]int32, bool) {
-	f.symIndexMu.Lock()
-	defer f.symIndexMu.Unlock()
-	return f.symIdx.symAddrs.get(syms, addrIndexAfterLookups, func() []int32 {
-		return buildAddrOrder(len(syms), func(i int) uint64 { return syms[i].Value })
-	})
-}
-
-func (f *File) dyldExportsAddrIndex(exports []trie.TrieExport) ([]int32, bool) {
-	f.symIndexMu.Lock()
-	defer f.symIndexMu.Unlock()
-	return f.symIdx.dyldExpAddrs.get(exports, addrIndexAfterLookups, func() []int32 {
-		return buildAddrOrder(len(exports), func(i int) uint64 { return exports[i].Address })
-	})
 }
 
 // cachedExports is GetExports without re-reading and re-parsing the export
@@ -349,75 +298,11 @@ func (f *File) exportsNameIndex(exports []trie.TrieExport) (*nameIndex, bool) {
 	return ix, ok
 }
 
-// valueRange returns the sub-slice of order whose positions carry value.
-func valueRange(order []int32, value func(i int) uint64, addr uint64) []int32 {
-	// Values are exported and can change between calls. Binary search requires
-	// both sorted values and original-table ordering for duplicates.
-	for j := 1; j < len(order); j++ {
-		prev, cur := value(int(order[j-1])), value(int(order[j]))
-		if cur < prev || (cur == prev && order[j] < order[j-1]) {
-			var matches []int32
-			for i := range order {
-				if value(i) == addr {
-					matches = append(matches, int32(i))
-				}
-			}
-			return matches
-		}
-	}
-	lo := sort.Search(len(order), func(j int) bool { return value(int(order[j])) >= addr })
-	hi := lo
-	for hi < len(order) && value(int(order[hi])) == addr {
-		hi++
-	}
-	return order[lo:hi]
-}
-
-// bindNameIndex maps a bind's slot address (Start+SegOffset) to the FIRST bind
-// at that address. Guarded by fixupsMu, like the f.binds it is built from.
-type bindSlots struct {
-	first map[uint64]int32
-	slots []uint64
-}
-
-type bindNameIndex = lazyIndex[types.Bind, bindSlots]
-
 // bindAtLocked returns the first bind whose slot address is pointer. It must be
-// called with fixupsMu held.
+// called with fixupsMu held. The bind table returned by GetBindInfo is public
+// and may be edited in place, so an index would have to be validated against
+// every entry per call, which is slower than this scan (measured 63 us vs 34 us).
 func (f *File) bindAtLocked(binds types.Binds, pointer uint64) (string, bool) {
-	index, ok := f.bindNameIdx.get(binds, bindIndexAfterLookups, func() bindSlots {
-		m := make(map[uint64]int32, len(binds))
-		slots := make([]uint64, len(binds))
-		for i := range binds {
-			addr := binds[i].Start + binds[i].SegOffset
-			slots[i] = addr
-			if _, ok := m[addr]; !ok {
-				m[addr] = int32(i)
-			}
-		}
-		return bindSlots{first: m, slots: slots}
-	})
-	// GetBindInfo 暴露可变切片；仅检查命中项会漏掉新地址或更早的重复项。
-	if ok {
-		for i := range binds {
-			if binds[i].Start+binds[i].SegOffset != index.slots[i] {
-				f.bindNameIdx = bindNameIndex{}
-				ok = false
-				break
-			}
-		}
-	}
-	if ok {
-		if i, ok := index.first[pointer]; ok {
-			if b := &binds[i]; b.Start+b.SegOffset == pointer {
-				return b.Name, true
-			}
-			// edited in place: forget the index and scan
-			f.bindNameIdx = bindNameIndex{}
-		} else {
-			return "", false
-		}
-	}
 	for i := range binds {
 		if binds[i].Start+binds[i].SegOffset == pointer {
 			return binds[i].Name, true
