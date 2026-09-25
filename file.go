@@ -700,6 +700,14 @@ func NewFile(r io.ReaderAt, config ...FileConfig) (*File, error) {
 			if err := binary.Read(b, bo, &hdr); err != nil {
 				return nil, fmt.Errorf("failed to read LC_DYSYMTAB: %v", err)
 			}
+			// 旧版 prelinked kext 可只保留本地重定位而没有 LC_SYMTAB。
+			// 仅接受完全不引用符号的动态表；有任何符号索引/计数仍按损坏输入拒绝。
+			if f.Symtab == nil && f.Type == types.MH_KEXT_BUNDLE &&
+				hdr.Ilocalsym == 0 && hdr.Nlocalsym == 0 && hdr.Iextdefsym == 0 && hdr.Nextdefsym == 0 &&
+				hdr.Iundefsym == 0 && hdr.Nundefsym == 0 && hdr.Nindirectsyms == 0 && hdr.Nextrel == 0 &&
+				hdr.Ntoc == 0 && hdr.Nmodtab == 0 && hdr.Nextrefsyms == 0 {
+				f.Symtab = &Symtab{}
+			}
 			if f.Symtab == nil {
 				return nil, &FormatError{offset, "dynamic symbol table seen before any ordinary symbol table", nil}
 			} else if hdr.Iundefsym > uint32(len(f.Symtab.Syms)) {
